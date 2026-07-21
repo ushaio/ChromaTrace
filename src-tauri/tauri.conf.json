@@ -1,0 +1,53 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "ChromaTrace",
+  "version": "0.1.0",
+  "identifier": "com.chromatrace.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:4173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "色迹 ChromaTrace",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1100,
+        "minHeight": 720,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' customprotocol: asset:; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https: http:",
+      "devCsp": "default-src 'self' customprotocol: asset: http://localhost:4173; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:4173; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline' http://localhost:4173; connect-src 'self' ipc: http://ipc.localhost http://localhost:4173 ws://localhost:4173 https: http:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "Photography",
+    "shortDescription": "本地优先的 AI 追色与 AI 调色工作台",
+    "longDescription": "使用本地颜色引擎和可选 OpenAI 兼容视觉、图像模型完成追色与调色。",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}
