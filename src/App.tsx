@@ -199,7 +199,7 @@ function App() {
           eyebrow: 'APPLICATION SETTINGS',
           title: '设置使用说明',
           steps: ['在左侧选择需要配置的设置模块。', '进入模型设置，配置服务地址、模型与 API Key。', '保存后运行连接测试，再按需启用模型能力。'],
-          note: 'API Key 保存在 Windows Credential Manager，不会写入前端配置文件。',
+          note: 'API Key 保存在系统凭据存储中，不会写入前端配置文件。',
         }
   const canExport = workspaceMode === 'match'
     ? Boolean(source && reference && hasResult)
@@ -842,7 +842,7 @@ function App() {
 
             <footer className="settings-rail__foot">
               <LockKeyhole size={13}/>
-              <span>本地优先 · API Key 存于 Windows 凭据管理器</span>
+              <span>本地优先 · API Key 存于系统凭据存储</span>
             </footer>
           </aside>
 

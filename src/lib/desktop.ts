@@ -686,7 +686,7 @@ export async function hasProviderApiKey(providerId: string) {
 }
 
 export async function testModelConnection(provider: ModelProvider) {
-  if (!isTauri()) throw new Error('模型请求需要在 Windows 客户端中运行。')
+  if (!isTauri()) throw new Error('模型请求需要在桌面客户端中运行。')
   return invoke<string>('test_model_connection', { config: providerRuntimeConfig(provider) })
 }
 
@@ -696,7 +696,7 @@ export async function analyzeWithModel(
   referenceDataUrl: string,
   analysisContext: string,
 ) {
-  if (!isTauri()) throw new Error('模型请求需要在 Windows 客户端中运行。')
+  if (!isTauri()) throw new Error('模型请求需要在桌面客户端中运行。')
   return invoke<ModelColorParameters>('analyze_with_model', {
     request: { config: visionRuntimeConfig(config), sourceDataUrl, referenceDataUrl, analysisContext },
   })
@@ -709,7 +709,7 @@ export async function refineMatchWithModel(
   resultDataUrl: string,
   analysisContext: string,
 ) {
-  if (!isTauri()) throw new Error('模型请求需要在 Windows 客户端中运行。')
+  if (!isTauri()) throw new Error('模型请求需要在桌面客户端中运行。')
   return invoke<ModelColorParameters>('refine_match_with_model', {
     request: { config: visionRuntimeConfig(config), sourceDataUrl, referenceDataUrl, resultDataUrl, analysisContext },
   })
@@ -720,7 +720,7 @@ export async function suggestColorWorkflows(
   sourceDataUrl: string,
   stylePrompt = '',
 ) {
-  if (!isTauri()) throw new Error('AI 调色分析需要在 Windows 客户端中运行。')
+  if (!isTauri()) throw new Error('AI 调色分析需要在桌面客户端中运行。')
   return invoke<ColorWorkflowSuggestion[]>('suggest_color_workflows', {
     request: { config: visionRuntimeConfig(config), sourceDataUrl, stylePrompt },
   })
@@ -731,7 +731,7 @@ export async function optimizeColorPrompt(
   stylePrompt: string,
   sourceDataUrl?: string,
 ) {
-  if (!isTauri()) throw new Error('提示词优化需要在 Windows 客户端中运行。')
+  if (!isTauri()) throw new Error('提示词优化需要在桌面客户端中运行。')
   return invoke<string>('optimize_color_prompt', {
     request: { config: visionRuntimeConfig(config), stylePrompt, sourceDataUrl },
   })
@@ -744,7 +744,7 @@ export async function generateColoredImage(
   customInstruction = '',
   imageOptions: ImageGenerationRequestOptions = {},
 ) {
-  if (!isTauri()) throw new Error('图生图调色需要在 Windows 客户端中运行。')
+  if (!isTauri()) throw new Error('图生图调色需要在桌面客户端中运行。')
   return invoke<GeneratedImageResult>('generate_colored_image', {
     request: {
       config: imageRuntimeConfig(config),

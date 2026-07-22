@@ -194,6 +194,21 @@ src-tauri/target/release/bundle/nsis/ChromaTrace_0.1.0_x64-setup.exe
 
 当前开发构建未配置代码签名证书，Windows 可能显示“未知发布者”。正式分发前应配置 Windows 代码签名。
 
+### 使用 GitHub Actions 构建 macOS
+
+仓库中的 `.github/workflows/build-macos.yml` 会在 `macos-14` Runner 上构建同时支持 Apple Silicon 与 Intel 的 Universal 应用。可在 GitHub 仓库的 **Actions → Build macOS → Run workflow** 手动启动；推送 `v*` 版本标签时也会自动运行。
+
+工作流完成后，在运行详情页的 **Artifacts** 下载 `ChromaTrace-macOS-universal`，其中包含：
+
+```text
+ChromaTrace.app.zip
+ChromaTrace_0.1.0_universal.dmg
+```
+
+该自动构建默认未使用 Developer ID 签名和 Apple 公证，仅适合内部测试。正式公开分发时，需要在仓库 Secrets 中配置 Apple 开发者证书、公证账号，并为工作流增加签名与 notarization 环境变量。
+
+macOS 使用系统 Keychain 保存 API Key；Windows 继续使用 Credential Manager。
+
 ## 项目结构
 
 ```text
@@ -209,9 +224,9 @@ src/
   lib/types.ts                   业务类型、模型设置和默认参数
 src-tauri/
   src/lib.rs                     Tauri 命令与插件注册
-  src/credentials.rs             Windows Credential Manager
+  src/credentials.rs             系统安全凭据（Keychain / Credential Manager）
   src/model_client.rs            视觉模型与图像编辑模型请求
-  tauri.conf.json                Windows 窗口与打包配置
+  tauri.conf.json                基础窗口与 Windows 打包配置
 docs/
   AI_COLOR_MATCH_MVP_PLAN.md
   AI_COLOR_GRADING_V1_PLAN.md

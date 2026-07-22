@@ -144,7 +144,7 @@ export function ModelSettingsWorkspace({
       await removeProviderApiKey(providerId)
       onCredentialStatusChange(providerId, false)
       setApiKeyInputs((current) => ({ ...current, [providerId]: '' }))
-      notify('该供应商的 API Key 已从 Windows 凭据管理器删除')
+      notify('该供应商的 API Key 已从系统凭据存储中删除')
     } catch (error) {
       notify(errorMessage(error, '删除凭据失败'), 'error')
     } finally {
@@ -584,7 +584,7 @@ export function ModelSettingsWorkspace({
       <footer className="settings-panel__foot">
         <div className="settings-panel__foot-meta">
           <LockKeyhole size={14}/>
-          <span>每个供应商的凭据独立存储在 Windows Credential Manager</span>
+          <span>每个供应商的凭据独立存储在系统安全凭据中</span>
           <span className="settings-panel__foot-count">
             <Boxes size={13}/>
             {settings.providers.length} 供应商 · {settings.visionModels.length + settings.imageModels.length} 模型

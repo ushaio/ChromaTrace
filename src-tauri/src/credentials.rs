@@ -20,12 +20,12 @@ fn validate_provider_id(provider_id: &str) -> Result<&str, String> {
 fn entry(provider_id: &str) -> Result<Entry, String> {
     let provider_id = validate_provider_id(provider_id)?;
     Entry::new(SERVICE, &format!("model-api-key:{provider_id}"))
-        .map_err(|error| format!("无法访问 Windows 凭据管理器：{error}"))
+        .map_err(|error| format!("无法访问系统凭据存储：{error}"))
 }
 
 fn legacy_entry() -> Result<Entry, String> {
     Entry::new(SERVICE, LEGACY_USER)
-        .map_err(|error| format!("无法访问 Windows 凭据管理器：{error}"))
+        .map_err(|error| format!("无法访问系统凭据存储：{error}"))
 }
 
 #[tauri::command]
