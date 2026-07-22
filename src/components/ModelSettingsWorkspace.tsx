@@ -1,5 +1,5 @@
 ﻿import {
-  Boxes, Check, CloudCog, Eye, Image, KeyRound, LoaderCircle, LockKeyhole, Plus,
+  Boxes, Check, Eye, Image, KeyRound, LoaderCircle, LockKeyhole, Plus,
   Save, Server, Trash2, WandSparkles, Wifi, WifiOff, X,
 } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
@@ -47,6 +47,7 @@ export function ModelSettingsWorkspace({
     ? settings.providers.find((provider) => provider.id === selectedImage.providerId) || null
     : null
   const selectedImageUsesGenerations = selectedImageProvider?.apiType === 'images-generations'
+  const readyProviderCount = settings.providers.filter((provider) => credentialStatus[provider.id]).length
 
   useEffect(() => {
     if (!settings.providers.some((provider) => provider.id === selectedProviderId)) setSelectedProviderId(settings.providers[0]?.id || '')
@@ -211,132 +212,422 @@ export function ModelSettingsWorkspace({
   }
 
   const sectionMeta = tab === 'providers'
-    ? { eyebrow: 'PROVIDER REGISTRY', title: '模型供应商', description: '独立维护服务地址、API 类型与安全凭据。视觉和图像模型可引用不同供应商。' }
+    ? {
+        eyebrow: 'PROVIDERS',
+        title: '模型供应商',
+        description: '管理服务地址、API 类型与凭据。视觉与图像模型可分别引用不同供应商。',
+        action: '新增供应商',
+        onAdd: addProvider,
+      }
     : tab === 'vision'
-      ? { eyebrow: 'VISION MODELS', title: '视觉模型', description: '用于 AI 追色、图片理解、提示词优化和结构化调色配方。' }
-      : { eyebrow: 'IMAGE GENERATION', title: '图像生成模型', description: '用于图像编辑或 /images/generations 纯文本生图，与视觉分析模型完全独立。' }
+      ? {
+          eyebrow: 'VISION',
+          title: '视觉模型',
+          description: '用于 AI 追色、画面理解、提示词优化与结构化调色配方。',
+          action: '新增视觉模型',
+          onAdd: addVision,
+        }
+      : {
+          eyebrow: 'IMAGE',
+          title: '图像生成模型',
+          description: '用于图生图或 /images/generations 纯文本生图，与视觉分析模型独立。',
+          action: '新增图像模型',
+          onAdd: addImage,
+        }
 
   return (
-    <section className="model-settings-workspace settings-module">
-      <header className="model-settings-hero">
+    <section className="settings-panel model-panel">
+      <header className="settings-panel__head">
         <div>
-          <span className="settings-breadcrumb">设置 <i>/</i> 模型设置</span>
-          <span className="kicker">MODEL ORCHESTRATION / WINDOWS</span>
+          <span className="settings-panel__crumb">设置 / 模型</span>
           <h2>模型设置</h2>
-          <p>集中维护多个模型供应商，并为视觉分析与图像生成分别选择当前模型。</p>
+          <p>配置供应商与路由，让 AI 追色、配方分析和图生图各自走正确的服务端点。</p>
         </div>
-        <div className={`model-overview ${settings.enabled ? 'is-enabled' : ''}`}>
-          <span className="model-overview__icon">{settings.enabled ? <Wifi size={22}/> : <WifiOff size={22}/>}</span>
-          <div><span>当前路由</span><strong>{settings.enabled ? '模型能力已启用' : '完全离线模式'}</strong><small>{activeVision?.name || '未选择视觉模型'} · {activeImage?.name || '未选择图像模型'}</small></div>
+        <div className={`settings-panel__pulse ${settings.enabled ? 'is-on' : ''}`}>
+          {settings.enabled ? <Wifi size={16}/> : <WifiOff size={16}/>}
+          <span>
+            <strong>{settings.enabled ? '模型能力已启用' : '完全离线模式'}</strong>
+            <small>{activeVision?.name || '未选视觉'} · {activeImage?.name || '未选图像'}</small>
+          </span>
         </div>
       </header>
 
-      <div className="model-settings-scroll model-registry-scroll">
-        <section className="module model-capability-banner">
-          <div className="model-capability-banner__copy">
-            <span className="model-capability-banner__icon"><CloudCog size={19}/></span>
-            <div><strong>模型能力总开关</strong><small>关闭后所有 AI 工作流停用，但供应商与模型配置会继续保留。</small></div>
-          </div>
-          <label className="toggle-row toggle-row--compact">
-            <span><b>{settings.enabled ? '已启用' : '已关闭'}</b></span>
-            <input type="checkbox" checked={settings.enabled} onChange={(event) => onChange({ ...settings, enabled: event.target.checked })}/>
-          </label>
+      <div className="settings-panel__body model-panel__body">
+        <section className="settings-metric-row" aria-label="模型配置概览">
+          <article className="settings-metric">
+            <span>供应商</span>
+            <strong>{settings.providers.length}</strong>
+            <small>{readyProviderCount} 个已配置 Key</small>
+          </article>
+          <article className="settings-metric">
+            <span>视觉模型</span>
+            <strong>{settings.visionModels.length}</strong>
+            <small>{activeVision?.name || '未设当前'}</small>
+          </article>
+          <article className="settings-metric">
+            <span>图像模型</span>
+            <strong>{settings.imageModels.length}</strong>
+            <small>{activeImage?.name || '未设当前'}</small>
+          </article>
+          <article className={`settings-metric settings-metric--toggle ${settings.enabled ? 'is-on' : ''}`}>
+            <span>能力开关</span>
+            <label className="settings-switch settings-switch--block">
+              <strong>{settings.enabled ? '已启用' : '已关闭'}</strong>
+              <input
+                type="checkbox"
+                checked={settings.enabled}
+                onChange={(event) => onChange({ ...settings, enabled: event.target.checked })}
+              />
+            </label>
+            <small>关闭后保留配置，停用 AI 流程</small>
+          </article>
         </section>
 
-        <nav className="model-registry-tabs" aria-label="模型设置分类">
-          <button type="button" className={tab === 'providers' ? 'is-active' : ''} onClick={() => setTab('providers')}><Server size={16}/><span>供应商</span><b>{settings.providers.length}</b></button>
-          <button type="button" className={tab === 'vision' ? 'is-active' : ''} onClick={() => setTab('vision')}><Eye size={16}/><span>视觉模型</span><b>{settings.visionModels.length}</b></button>
-          <button type="button" className={tab === 'image' ? 'is-active' : ''} onClick={() => setTab('image')}><Image size={16}/><span>图像生成模型</span><b>{settings.imageModels.length}</b></button>
+        <nav className="settings-seg" aria-label="模型设置分类">
+          <button type="button" className={tab === 'providers' ? 'is-active' : ''} onClick={() => setTab('providers')}>
+            <Server size={15}/><span>供应商</span><b>{settings.providers.length}</b>
+          </button>
+          <button type="button" className={tab === 'vision' ? 'is-active' : ''} onClick={() => setTab('vision')}>
+            <Eye size={15}/><span>视觉</span><b>{settings.visionModels.length}</b>
+          </button>
+          <button type="button" className={tab === 'image' ? 'is-active' : ''} onClick={() => setTab('image')}>
+            <Image size={15}/><span>图像</span><b>{settings.imageModels.length}</b>
+          </button>
         </nav>
 
-        <div className="model-registry-heading">
-          <div><span className="kicker">{sectionMeta.eyebrow}</span><h3>{sectionMeta.title}</h3><p>{sectionMeta.description}</p></div>
-          <button className="button button--light" type="button" onClick={tab === 'providers' ? addProvider : tab === 'vision' ? addVision : addImage}><Plus size={14}/> 新增{tab === 'providers' ? '供应商' : '模型'}</button>
+        <div className="settings-section-bar">
+          <div>
+            <span className="kicker">{sectionMeta.eyebrow}</span>
+            <h3>{sectionMeta.title}</h3>
+            <p>{sectionMeta.description}</p>
+          </div>
+          <button className="button button--light" type="button" onClick={sectionMeta.onAdd}>
+            <Plus size={14}/> {sectionMeta.action}
+          </button>
         </div>
 
         {tab === 'providers' ? (
-          <div className="model-registry-layout">
-            <aside className="model-entity-list" aria-label="供应商列表">
+          <div className="settings-split">
+            <aside className="settings-list" aria-label="供应商列表">
               {settings.providers.map((provider) => {
-                const modelCount = settings.visionModels.filter((model) => model.providerId === provider.id).length + settings.imageModels.filter((model) => model.providerId === provider.id).length
-                return <button type="button" key={provider.id} className={provider.id === selectedProvider?.id ? 'is-active' : ''} onClick={() => setSelectedProviderId(provider.id)}>
-                  <span className="model-entity-icon"><Server size={15}/></span><span><strong>{provider.name || '未命名供应商'}</strong><small>{provider.baseUrl || '等待填写 Base URL'}</small></span><em className={credentialStatus[provider.id] ? 'is-ready' : ''}>{credentialStatus[provider.id] ? 'KEY' : modelCount}</em>
-                </button>
+                const modelCount = settings.visionModels.filter((model) => model.providerId === provider.id).length
+                  + settings.imageModels.filter((model) => model.providerId === provider.id).length
+                return (
+                  <button
+                    type="button"
+                    key={provider.id}
+                    className={provider.id === selectedProvider?.id ? 'is-active' : ''}
+                    onClick={() => setSelectedProviderId(provider.id)}
+                  >
+                    <span className="settings-list__icon"><Server size={15}/></span>
+                    <span className="settings-list__copy">
+                      <strong>{provider.name || '未命名供应商'}</strong>
+                      <small>{provider.baseUrl || '等待填写 Base URL'}</small>
+                    </span>
+                    <em className={credentialStatus[provider.id] ? 'is-ready' : ''}>
+                      {credentialStatus[provider.id] ? 'KEY' : `${modelCount}`}
+                    </em>
+                  </button>
+                )
               })}
             </aside>
+
             {selectedProvider ? (
-              <section className="module model-entity-editor model-form">
-                <div className="module__heading"><div><span className="kicker">PROVIDER DETAIL</span><h3>{selectedProvider.name || '未命名供应商'}</h3></div><button className="icon-button icon-button--danger" type="button" title="删除供应商" onClick={() => deleteProvider(selectedProvider)}><Trash2 size={15}/></button></div>
-                <div className="model-form-grid">
-                  <label><span>供应商名称</span><input value={selectedProvider.name} onChange={(event) => updateProvider(selectedProvider.id, 'name', event.target.value)} placeholder="例如 OpenAI / Azure / 自建服务"/></label>
-                  <label><span>API 类型</span><select value={selectedProvider.apiType} onChange={(event) => updateProvider(selectedProvider.id, 'apiType', event.target.value as ModelProvider['apiType'])}><option value="responses">/responses</option><option value="chat-completions">/chat/completions</option><option value="images-generations">/images/generations</option></select></label>
-                  <label className="model-form-span"><span>Base URL</span><input value={selectedProvider.baseUrl} onChange={(event) => updateProvider(selectedProvider.id, 'baseUrl', event.target.value)} placeholder="https://api.example.com/v1"/></label>
+              <section className="settings-card settings-editor">
+                <div className="settings-card__head">
+                  <div>
+                    <span className="kicker">PROVIDER</span>
+                    <h3>{selectedProvider.name || '未命名供应商'}</h3>
+                  </div>
+                  <button className="icon-button icon-button--danger" type="button" title="删除供应商" onClick={() => deleteProvider(selectedProvider)}>
+                    <Trash2 size={15}/>
+                  </button>
                 </div>
-                <div className="provider-credential-block">
-                  <div className="provider-credential-status"><LockKeyhole size={15}/><span><strong>API Key</strong><small>{credentialStatus[selectedProvider.id] ? '已安全保存在当前 Windows 用户账户' : '尚未配置该供应商凭据'}</small></span><b className={credentialStatus[selectedProvider.id] ? 'readout-ok' : ''}>{credentialStatus[selectedProvider.id] ? '已保存' : '未配置'}</b></div>
-                  <label><span>{credentialStatus[selectedProvider.id] ? '输入新 Key 可覆盖当前凭据' : 'API Key'}</span><input type="password" autoComplete="off" value={apiKeyInputs[selectedProvider.id] || ''} onChange={(event) => setApiKeyInputs((current) => ({ ...current, [selectedProvider.id]: event.target.value }))} placeholder={credentialStatus[selectedProvider.id] ? '••••••••••••••••' : '输入供应商 API Key'}/></label>
-                  <div className="credential-actions">
-                    <button className="button button--dark" type="button" disabled={!credentialStatus[selectedProvider.id] || busyAction === `clear:${selectedProvider.id}`} onClick={() => void clearCredential(selectedProvider.id)}>{busyAction === `clear:${selectedProvider.id}` ? <LoaderCircle className="spin" size={14}/> : <X size={14}/>} 清除凭据</button>
-                    <button className="button button--dark" type="button" disabled={busyAction === `test:${selectedProvider.id}`} onClick={() => void testProvider(selectedProvider)}>{busyAction === `test:${selectedProvider.id}` ? <LoaderCircle className="spin" size={14}/> : <KeyRound size={14}/>} 测试连接</button>
+
+                <div className="settings-fields">
+                  <label>
+                    <span>供应商名称</span>
+                    <input value={selectedProvider.name} onChange={(event) => updateProvider(selectedProvider.id, 'name', event.target.value)} placeholder="例如 OpenAI / Azure / 自建服务"/>
+                  </label>
+                  <label>
+                    <span>API 类型</span>
+                    <select value={selectedProvider.apiType} onChange={(event) => updateProvider(selectedProvider.id, 'apiType', event.target.value as ModelProvider['apiType'])}>
+                      <option value="responses">/responses</option>
+                      <option value="chat-completions">/chat/completions</option>
+                      <option value="images-generations">/images/generations</option>
+                    </select>
+                  </label>
+                  <label className="settings-fields__span">
+                    <span>Base URL</span>
+                    <input value={selectedProvider.baseUrl} onChange={(event) => updateProvider(selectedProvider.id, 'baseUrl', event.target.value)} placeholder="https://api.example.com/v1"/>
+                  </label>
+                </div>
+
+                <div className="settings-credential">
+                  <div className="settings-credential__status">
+                    <LockKeyhole size={15}/>
+                    <span>
+                      <strong>API Key</strong>
+                      <small>{credentialStatus[selectedProvider.id] ? '已保存在当前 Windows 用户账户' : '尚未配置该供应商凭据'}</small>
+                    </span>
+                    <b className={credentialStatus[selectedProvider.id] ? 'is-ready' : ''}>
+                      {credentialStatus[selectedProvider.id] ? '已保存' : '未配置'}
+                    </b>
+                  </div>
+                  <label>
+                    <span>{credentialStatus[selectedProvider.id] ? '输入新 Key 可覆盖当前凭据' : 'API Key'}</span>
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      value={apiKeyInputs[selectedProvider.id] || ''}
+                      onChange={(event) => setApiKeyInputs((current) => ({ ...current, [selectedProvider.id]: event.target.value }))}
+                      placeholder={credentialStatus[selectedProvider.id] ? '••••••••••••••••' : '输入供应商 API Key'}
+                    />
+                  </label>
+                  <div className="settings-credential__actions">
+                    <button
+                      className="button button--dark"
+                      type="button"
+                      disabled={!credentialStatus[selectedProvider.id] || busyAction === `clear:${selectedProvider.id}`}
+                      onClick={() => void clearCredential(selectedProvider.id)}
+                    >
+                      {busyAction === `clear:${selectedProvider.id}` ? <LoaderCircle className="spin" size={14}/> : <X size={14}/>}
+                      清除凭据
+                    </button>
+                    <button
+                      className="button button--dark"
+                      type="button"
+                      disabled={busyAction === `test:${selectedProvider.id}`}
+                      onClick={() => void testProvider(selectedProvider)}
+                    >
+                      {busyAction === `test:${selectedProvider.id}` ? <LoaderCircle className="spin" size={14}/> : <KeyRound size={14}/>}
+                      测试连接
+                    </button>
                   </div>
                 </div>
               </section>
-            ) : <EmptyRegistry icon={<Server size={24}/>} title="暂无供应商" description="添加供应商后即可维护连接信息与凭据。"/>}
+            ) : (
+              <EmptyRegistry icon={<Server size={24}/>} title="暂无供应商" description="添加供应商后即可维护连接信息与凭据。" onAction={addProvider} actionLabel="新增供应商"/>
+            )}
           </div>
         ) : tab === 'vision' ? (
-          <div className="model-registry-layout">
-            <aside className="model-entity-list" aria-label="视觉模型列表">
-              {settings.visionModels.map((model) => <button type="button" key={model.id} className={model.id === selectedVision?.id ? 'is-active' : ''} onClick={() => setSelectedVisionId(model.id)}>
-                <span className="model-entity-icon"><Eye size={15}/></span><span><strong>{model.name || '未命名视觉模型'}</strong><small>{settings.providers.find((provider) => provider.id === model.providerId)?.name || '供应商已丢失'} · {model.model || '未填写模型 ID'}</small></span>{settings.activeVisionModelId === model.id ? <em className="is-ready">当前</em> : null}
-              </button>)}
+          <div className="settings-split">
+            <aside className="settings-list" aria-label="视觉模型列表">
+              {settings.visionModels.map((model) => (
+                <button
+                  type="button"
+                  key={model.id}
+                  className={model.id === selectedVision?.id ? 'is-active' : ''}
+                  onClick={() => setSelectedVisionId(model.id)}
+                >
+                  <span className="settings-list__icon"><Eye size={15}/></span>
+                  <span className="settings-list__copy">
+                    <strong>{model.name || '未命名视觉模型'}</strong>
+                    <small>{settings.providers.find((provider) => provider.id === model.providerId)?.name || '供应商已丢失'} · {model.model || '未填写模型 ID'}</small>
+                  </span>
+                  {settings.activeVisionModelId === model.id ? <em className="is-ready">当前</em> : null}
+                </button>
+              ))}
             </aside>
+
             {selectedVision ? (
-              <section className="module model-entity-editor model-form">
-                <div className="module__heading"><div><span className="kicker">VISION DETAIL</span><h3>{selectedVision.name || '未命名视觉模型'}</h3></div><button className="icon-button icon-button--danger" type="button" title="删除视觉模型" onClick={() => deleteVision(selectedVision)}><Trash2 size={15}/></button></div>
-                <div className="model-form-grid">
-                  <label><span>显示名称</span><input value={selectedVision.name} onChange={(event) => updateVision(selectedVision.id, 'name', event.target.value)} placeholder="例如 主力视觉模型"/></label>
-                  <label><span>模型供应商</span><select value={selectedVision.providerId} onChange={(event) => updateVision(selectedVision.id, 'providerId', event.target.value)}>{settings.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
-                  <label className="model-form-span"><span>API 模型 ID</span><input value={selectedVision.model} onChange={(event) => updateVision(selectedVision.id, 'model', event.target.value)} placeholder="填写支持图片输入的模型 ID"/></label>
-                  <label><span>分析图片最长边</span><input type="number" min="512" max="4096" step="128" value={selectedVision.maxImageSide} onChange={(event) => updateVision(selectedVision.id, 'maxImageSide', Number(event.target.value))}/></label>
-                  <label><span>请求超时（秒）</span><input type="number" min="10" max="600" value={selectedVision.timeoutSeconds} onChange={(event) => updateVision(selectedVision.id, 'timeoutSeconds', Number(event.target.value))}/></label>
+              <section className="settings-card settings-editor">
+                <div className="settings-card__head">
+                  <div>
+                    <span className="kicker">VISION MODEL</span>
+                    <h3>{selectedVision.name || '未命名视觉模型'}</h3>
+                  </div>
+                  <button className="icon-button icon-button--danger" type="button" title="删除视觉模型" onClick={() => deleteVision(selectedVision)}>
+                    <Trash2 size={15}/>
+                  </button>
                 </div>
-                <div className="model-active-action"><div><Eye size={15}/><span><strong>用于视觉分析</strong><small>AI 追色、配方分析和提示词优化将使用此模型。</small></span></div><button className={`button ${settings.activeVisionModelId === selectedVision.id ? 'button--dark is-selected' : 'button--accent'}`} type="button" onClick={() => onChange({ ...settings, activeVisionModelId: selectedVision.id })}>{settings.activeVisionModelId === selectedVision.id ? <Check size={14}/> : <WandSparkles size={14}/>} {settings.activeVisionModelId === selectedVision.id ? '当前视觉模型' : '设为当前'}</button></div>
+
+                <div className="settings-fields">
+                  <label>
+                    <span>显示名称</span>
+                    <input value={selectedVision.name} onChange={(event) => updateVision(selectedVision.id, 'name', event.target.value)} placeholder="例如 主力视觉模型"/>
+                  </label>
+                  <label>
+                    <span>模型供应商</span>
+                    <select value={selectedVision.providerId} onChange={(event) => updateVision(selectedVision.id, 'providerId', event.target.value)}>
+                      {settings.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+                    </select>
+                  </label>
+                  <label className="settings-fields__span">
+                    <span>API 模型 ID</span>
+                    <input value={selectedVision.model} onChange={(event) => updateVision(selectedVision.id, 'model', event.target.value)} placeholder="填写支持图片输入的模型 ID"/>
+                  </label>
+                  <label>
+                    <span>分析图片最长边</span>
+                    <input type="number" min="512" max="4096" step="128" value={selectedVision.maxImageSide} onChange={(event) => updateVision(selectedVision.id, 'maxImageSide', Number(event.target.value))}/>
+                  </label>
+                  <label>
+                    <span>请求超时（秒）</span>
+                    <input type="number" min="10" max="600" value={selectedVision.timeoutSeconds} onChange={(event) => updateVision(selectedVision.id, 'timeoutSeconds', Number(event.target.value))}/>
+                  </label>
+                </div>
+
+                <div className="settings-active-row">
+                  <div>
+                    <Eye size={15}/>
+                    <span>
+                      <strong>用于视觉分析</strong>
+                      <small>AI 追色、配方分析与提示词优化将使用此模型。</small>
+                    </span>
+                  </div>
+                  <button
+                    className={`button ${settings.activeVisionModelId === selectedVision.id ? 'button--dark is-selected' : 'button--accent'}`}
+                    type="button"
+                    onClick={() => onChange({ ...settings, activeVisionModelId: selectedVision.id })}
+                  >
+                    {settings.activeVisionModelId === selectedVision.id ? <Check size={14}/> : <WandSparkles size={14}/>}
+                    {settings.activeVisionModelId === selectedVision.id ? '当前视觉模型' : '设为当前'}
+                  </button>
+                </div>
               </section>
-            ) : <EmptyRegistry icon={<Eye size={24}/>} title="暂无视觉模型" description="添加视觉模型以启用图片理解与调色配方分析。"/>}
+            ) : (
+              <EmptyRegistry icon={<Eye size={24}/>} title="暂无视觉模型" description="添加视觉模型以启用图片理解与调色配方分析。" onAction={addVision} actionLabel="新增视觉模型"/>
+            )}
           </div>
         ) : (
-          <div className="model-registry-layout">
-            <aside className="model-entity-list" aria-label="图像生成模型列表">
-              {settings.imageModels.map((model) => <button type="button" key={model.id} className={model.id === selectedImage?.id ? 'is-active' : ''} onClick={() => setSelectedImageId(model.id)}>
-                <span className="model-entity-icon"><Image size={15}/></span><span><strong>{model.name || '未命名图像模型'}</strong><small>{settings.providers.find((provider) => provider.id === model.providerId)?.name || '供应商已丢失'} · {model.model || '未填写模型 ID'}</small></span>{settings.activeImageModelId === model.id ? <em className="is-ready">当前</em> : null}
-              </button>)}
+          <div className="settings-split">
+            <aside className="settings-list" aria-label="图像生成模型列表">
+              {settings.imageModels.map((model) => (
+                <button
+                  type="button"
+                  key={model.id}
+                  className={model.id === selectedImage?.id ? 'is-active' : ''}
+                  onClick={() => setSelectedImageId(model.id)}
+                >
+                  <span className="settings-list__icon"><Image size={15}/></span>
+                  <span className="settings-list__copy">
+                    <strong>{model.name || '未命名图像模型'}</strong>
+                    <small>{settings.providers.find((provider) => provider.id === model.providerId)?.name || '供应商已丢失'} · {model.model || '未填写模型 ID'}</small>
+                  </span>
+                  {settings.activeImageModelId === model.id ? <em className="is-ready">当前</em> : null}
+                </button>
+              ))}
             </aside>
+
             {selectedImage ? (
-              <section className="module model-entity-editor model-form">
-                <div className="module__heading"><div><span className="kicker">IMAGE MODEL DETAIL</span><h3>{selectedImage.name || '未命名图像模型'}</h3></div><button className="icon-button icon-button--danger" type="button" title="删除图像模型" onClick={() => deleteImage(selectedImage)}><Trash2 size={15}/></button></div>
-                <div className="model-form-grid">
-                  <label><span>显示名称</span><input value={selectedImage.name} onChange={(event) => updateImage(selectedImage.id, 'name', event.target.value)} placeholder="例如 高质量图像编辑"/></label>
-                  <label><span>模型供应商</span><select value={selectedImage.providerId} onChange={(event) => changeImageProvider(selectedImage, event.target.value)}>{settings.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · /{provider.apiType === 'chat-completions' ? 'chat/completions' : provider.apiType === 'images-generations' ? 'images/generations' : 'responses'}</option>)}</select></label>
-                  <label className="model-form-span"><span>API 模型 ID</span><input value={selectedImage.model} onChange={(event) => updateImage(selectedImage.id, 'model', event.target.value)} placeholder="填写图像生成或编辑模型 ID"/></label>
-                  {!selectedImageUsesGenerations ? <label><span>输入图片最长边</span><input type="number" min="512" max="4096" step="128" value={selectedImage.maxImageSide} onChange={(event) => updateImage(selectedImage.id, 'maxImageSide', Number(event.target.value))}/></label> : null}
-                  <label><span>生成超时（秒）</span><input type="number" min="30" max="1200" value={selectedImage.timeoutSeconds} onChange={(event) => updateImage(selectedImage.id, 'timeoutSeconds', Number(event.target.value))}/></label>
+              <section className="settings-card settings-editor">
+                <div className="settings-card__head">
+                  <div>
+                    <span className="kicker">IMAGE MODEL</span>
+                    <h3>{selectedImage.name || '未命名图像模型'}</h3>
+                  </div>
+                  <button className="icon-button icon-button--danger" type="button" title="删除图像模型" onClick={() => deleteImage(selectedImage)}>
+                    <Trash2 size={15}/>
+                  </button>
                 </div>
-                <div className="model-active-action"><div><Image size={15}/><span><strong>用于图像生成 / 编辑</strong><small>{selectedImageUsesGenerations ? '不上传原图；输出质量、尺寸、画风等参数在每次使用时配置。' : '会发送重编码图片；输出质量与尺寸在每次使用时配置。'}</small></span></div><button className={`button ${settings.activeImageModelId === selectedImage.id ? 'button--dark is-selected' : 'button--accent'}`} type="button" onClick={() => onChange({ ...settings, activeImageModelId: selectedImage.id })}>{settings.activeImageModelId === selectedImage.id ? <Check size={14}/> : <WandSparkles size={14}/>} {settings.activeImageModelId === selectedImage.id ? '当前图像模型' : '设为当前'}</button></div>
+
+                <div className="settings-fields">
+                  <label>
+                    <span>显示名称</span>
+                    <input value={selectedImage.name} onChange={(event) => updateImage(selectedImage.id, 'name', event.target.value)} placeholder="例如 高质量图像编辑"/>
+                  </label>
+                  <label>
+                    <span>模型供应商</span>
+                    <select value={selectedImage.providerId} onChange={(event) => changeImageProvider(selectedImage, event.target.value)}>
+                      {settings.providers.map((provider) => (
+                        <option key={provider.id} value={provider.id}>
+                          {provider.name} · /{provider.apiType === 'chat-completions' ? 'chat/completions' : provider.apiType === 'images-generations' ? 'images/generations' : 'responses'}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="settings-fields__span">
+                    <span>API 模型 ID</span>
+                    <input value={selectedImage.model} onChange={(event) => updateImage(selectedImage.id, 'model', event.target.value)} placeholder="填写图像生成或编辑模型 ID"/>
+                  </label>
+                  {!selectedImageUsesGenerations ? (
+                    <label>
+                      <span>输入图片最长边</span>
+                      <input type="number" min="512" max="4096" step="128" value={selectedImage.maxImageSide} onChange={(event) => updateImage(selectedImage.id, 'maxImageSide', Number(event.target.value))}/>
+                    </label>
+                  ) : null}
+                  <label>
+                    <span>生成超时（秒）</span>
+                    <input type="number" min="30" max="1200" value={selectedImage.timeoutSeconds} onChange={(event) => updateImage(selectedImage.id, 'timeoutSeconds', Number(event.target.value))}/>
+                  </label>
+                </div>
+
+                <div className="settings-active-row">
+                  <div>
+                    <Image size={15}/>
+                    <span>
+                      <strong>用于图像生成 / 编辑</strong>
+                      <small>
+                        {selectedImageUsesGenerations
+                          ? '不上传原图；输出质量、尺寸等参数在每次使用时配置。'
+                          : '会发送重编码图片；输出质量与尺寸在每次使用时配置。'}
+                      </small>
+                    </span>
+                  </div>
+                  <button
+                    className={`button ${settings.activeImageModelId === selectedImage.id ? 'button--dark is-selected' : 'button--accent'}`}
+                    type="button"
+                    onClick={() => onChange({ ...settings, activeImageModelId: selectedImage.id })}
+                  >
+                    {settings.activeImageModelId === selectedImage.id ? <Check size={14}/> : <WandSparkles size={14}/>}
+                    {settings.activeImageModelId === selectedImage.id ? '当前图像模型' : '设为当前'}
+                  </button>
+                </div>
               </section>
-            ) : <EmptyRegistry icon={<Image size={24}/>} title="暂无图像生成模型" description="添加模型后，图像编辑或纯文本生图会使用独立的供应商和凭据。"/>}
+            ) : (
+              <EmptyRegistry icon={<Image size={24}/>} title="暂无图像模型" description="添加模型后，图像编辑或纯文本生图会使用独立供应商。" onAction={addImage} actionLabel="新增图像模型"/>
+            )}
           </div>
         )}
       </div>
 
-      <footer className="model-settings-actions">
-        <div><LockKeyhole size={14}/><span>每个供应商的凭据独立存储在 Windows Credential Manager</span></div>
-        <div><span className="model-settings-summary"><Boxes size={13}/>{settings.providers.length} 个供应商 · {settings.visionModels.length + settings.imageModels.length} 个模型</span><button className="button button--accent" type="button" disabled={!settingsLoaded || busyAction === 'save'} onClick={() => { setBusyAction('save'); void saveAll().catch((error) => notify(errorMessage(error, '保存模型设置失败'), 'error')).finally(() => setBusyAction('')) }}>{busyAction === 'save' ? <LoaderCircle className="spin" size={15}/> : <Save size={15}/>} 保存全部设置</button></div>
+      <footer className="settings-panel__foot">
+        <div className="settings-panel__foot-meta">
+          <LockKeyhole size={14}/>
+          <span>每个供应商的凭据独立存储在 Windows Credential Manager</span>
+          <span className="settings-panel__foot-count">
+            <Boxes size={13}/>
+            {settings.providers.length} 供应商 · {settings.visionModels.length + settings.imageModels.length} 模型
+          </span>
+        </div>
+        <button
+          className="button button--accent"
+          type="button"
+          disabled={!settingsLoaded || busyAction === 'save'}
+          onClick={() => {
+            setBusyAction('save')
+            void saveAll()
+              .catch((error) => notify(errorMessage(error, '保存模型设置失败'), 'error'))
+              .finally(() => setBusyAction(''))
+          }}
+        >
+          {busyAction === 'save' ? <LoaderCircle className="spin" size={15}/> : <Save size={15}/>}
+          保存全部设置
+        </button>
       </footer>
     </section>
   )
 }
 
-function EmptyRegistry({ icon, title, description }: { icon: ReactNode; title: string; description: string }) {
-  return <section className="module model-registry-empty"><span>{icon}</span><strong>{title}</strong><p>{description}</p></section>
+function EmptyRegistry({
+  icon, title, description, onAction, actionLabel,
+}: {
+  icon: ReactNode
+  title: string
+  description: string
+  onAction?: () => void
+  actionLabel?: string
+}) {
+  return (
+    <section className="settings-card settings-empty">
+      <span className="settings-empty__icon">{icon}</span>
+      <strong>{title}</strong>
+      <p>{description}</p>
+      {onAction && actionLabel ? (
+        <button className="button button--light" type="button" onClick={onAction}>
+          <Plus size={14}/> {actionLabel}
+        </button>
+      ) : null}
+    </section>
+  )
 }
-

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  analyzeImageData, createMatchProfile, createModelMatchContext, oklabToRgb, rgbToOklab, sampleAdjustmentCurve,
-  suggestAdjustments, suggestMatchControls, transformRgb,
+  analyzeImageData, createMatchProfile, createModelMatchContext, oklabToRgb, processImageData, rgbToOklab,
+  sampleAdjustmentCurve, suggestAdjustments, suggestMatchControls, transformRgb,
 } from './colorEngine'
 import { createDefaultAdjustments } from './defaults'
 import type { Adjustments, RGB } from './types'
@@ -295,5 +295,51 @@ describe('linear-light adjustments', () => {
     expect(result[0]).toBeCloseTo(0.6858, 3)
     expect(result[1]).toBeCloseTo(0.6858, 3)
     expect(result[2]).toBeCloseTo(0.6858, 3)
+  })
+})
+
+describe('detail and optics-style adjustments', () => {
+  it('applies dehaze as midtone contrast and saturation lift', () => {
+    const flat = transformRgb([0.55, 0.52, 0.5], { ...neutralAdjustments, dehaze: 0, skinProtect: 0 })
+    const dehazed = transformRgb([0.55, 0.52, 0.5], { ...neutralAdjustments, dehaze: 60, skinProtect: 0 })
+    const haze = transformRgb([0.55, 0.52, 0.5], { ...neutralAdjustments, dehaze: -50, skinProtect: 0 })
+
+    const flatSpan = Math.max(...flat) - Math.min(...flat)
+    const dehazeSpan = Math.max(...dehazed) - Math.min(...dehazed)
+    expect(dehazeSpan).toBeGreaterThan(flatSpan)
+    expect(luma(haze)).toBeGreaterThan(luma(dehazed) - 0.05)
+  })
+
+  it('runs spatial detail and vignette through processImageData', () => {
+    const width = 16
+    const height = 16
+    const flatPixels: Pixel[] = Array.from({ length: width * height }, () => [160, 160, 160, 255])
+    const flat = imageData(width, height, flatPixels)
+
+    const vignetteOnly = createDefaultAdjustments()
+    vignetteOnly.skinProtect = 0
+    vignetteOnly.vignette = -80
+    vignetteOnly.vignetteMidpoint = 20
+    vignetteOnly.vignetteFeather = 50
+    const vignetted = processImageData(flat, vignetteOnly)
+    const center = (8 * width + 8) * 4
+    expect(vignetted.data[0]).toBeLessThan(vignetted.data[center])
+    expect(vignetted.data[center]).toBeGreaterThan(100)
+
+    const checkerPixels: Pixel[] = []
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const checker = ((x + y) % 2) * 180 + 40
+        checkerPixels.push([checker, checker, checker, 255])
+      }
+    }
+    const checker = imageData(width, height, checkerPixels)
+    const detail = createDefaultAdjustments()
+    detail.skinProtect = 0
+    detail.texture = 50
+    detail.clarity = 40
+    detail.sharpen = 60
+    const detailed = processImageData(checker, detail)
+    expect([...detailed.data]).not.toEqual([...checker.data])
   })
 })

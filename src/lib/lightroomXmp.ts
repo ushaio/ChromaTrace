@@ -15,27 +15,20 @@ export interface LightroomXmpPreset {
 const XMP_MAX_BYTES = 2 * 1024 * 1024
 const CURVE_SAMPLE_X = [0, 0.25, 0.5, 0.75, 1]
 
+/** Geometric / optics transforms still outside the pixel grading engine. */
 const IMPACTFUL_UNSUPPORTED_FIELDS: Record<string, string> = {
-  Texture: '纹理',
-  Clarity: '清晰度',
-  Clarity2012: '清晰度',
-  Dehaze: '去朦胧',
-  SharpenAmount: '锐化',
-  SharpenRadius: '锐化半径',
-  SharpenDetail: '锐化细节',
-  SharpenEdgeMasking: '锐化蒙版',
-  LuminanceSmoothing: '明亮度降噪',
-  ColorNoiseReduction: '颜色降噪',
   LensProfileEnable: '镜头配置文件',
   LensManualDistortionAmount: '镜头畸变',
   PerspectiveVertical: '垂直透视',
   PerspectiveHorizontal: '水平透视',
   PerspectiveRotate: '透视旋转',
+  PerspectiveScale: '透视缩放',
+  PerspectiveAspect: '透视纵横比',
+  PerspectiveX: '透视 X',
+  PerspectiveY: '透视 Y',
   UprightVersion: 'Upright 透视',
-  VignetteAmount: '镜头暗角',
-  PostCropVignetteAmount: '裁剪后暗角',
-  PostCropVignetteMidpoint: '暗角中点',
-  PostCropVignetteFeather: '暗角羽化',
+  UprightCenterMode: 'Upright 中心',
+  AutoLateralCA: '色差校正',
   CropTop: '裁剪',
   CropLeft: '裁剪',
   CropBottom: '裁剪',
@@ -171,8 +164,17 @@ export function parseLightroomXmp(xml: string, fileName = 'Lightroom preset.xmp'
   const mappedFields: string[] = []
   const warnings: string[] = []
 
+  type NumericProperty = keyof Pick<
+    Adjustments,
+    | 'exposure' | 'contrast' | 'highlights' | 'shadows' | 'whites' | 'blacks'
+    | 'temperature' | 'tint' | 'vibrance' | 'saturation' | 'fade' | 'grain'
+    | 'texture' | 'clarity' | 'dehaze' | 'sharpen' | 'sharpenRadius' | 'sharpenDetail'
+    | 'sharpenMasking' | 'luminanceNoiseReduction' | 'colorNoiseReduction'
+    | 'vignette' | 'vignetteMidpoint' | 'vignetteFeather'
+  >
+
   const mapNumeric = (
-    property: keyof Pick<Adjustments, 'exposure' | 'contrast' | 'highlights' | 'shadows' | 'whites' | 'blacks' | 'temperature' | 'tint' | 'vibrance' | 'saturation' | 'fade' | 'grain'>,
+    property: NumericProperty,
     label: string,
     minimum: number,
     maximum: number,
@@ -208,6 +210,27 @@ export function parseLightroomXmp(xml: string, fileName = 'Lightroom preset.xmp'
   mapNumeric('vibrance', '自然饱和度', -100, 100, 'Vibrance')
   mapNumeric('saturation', '饱和度', -100, 100, 'Saturation')
   mapNumeric('grain', '颗粒', 0, 100, 'GrainAmount')
+  mapNumeric('texture', '纹理', -100, 100, 'Texture')
+  mapNumeric('clarity', '清晰度', -100, 100, 'Clarity2012', 'Clarity')
+  mapNumeric('dehaze', '去朦胧', -100, 100, 'Dehaze')
+  mapNumeric('sharpen', '锐化', 0, 150, 'SharpenAmount')
+  mapNumeric('sharpenRadius', '锐化半径', 0.5, 3, 'SharpenRadius')
+  mapNumeric('sharpenDetail', '锐化细节', 0, 100, 'SharpenDetail')
+  mapNumeric('sharpenMasking', '锐化蒙版', 0, 100, 'SharpenEdgeMasking')
+  mapNumeric('luminanceNoiseReduction', '明亮度降噪', 0, 100, 'LuminanceSmoothing')
+  mapNumeric('colorNoiseReduction', '颜色降噪', 0, 100, 'ColorNoiseReduction')
+
+  const postCropVignette = numericField(xml, attributes, 'PostCropVignetteAmount')
+  const lensVignette = numericField(xml, attributes, 'VignetteAmount')
+  if (postCropVignette !== undefined) {
+    adjustments.vignette = clamp(postCropVignette, -100, 100)
+    mappedFields.push('暗角')
+  } else if (lensVignette !== undefined) {
+    adjustments.vignette = clamp(lensVignette, -100, 100)
+    mappedFields.push('暗角')
+  }
+  mapNumeric('vignetteMidpoint', '暗角中点', 0, 100, 'PostCropVignetteMidpoint', 'VignetteMidpoint')
+  mapNumeric('vignetteFeather', '暗角羽化', 0, 100, 'PostCropVignetteFeather', 'VignetteFeather')
 
   for (const [channel, suffix, label] of HSL_CHANNELS) {
     const hue = numericField(xml, attributes, `HueAdjustment${suffix}`)

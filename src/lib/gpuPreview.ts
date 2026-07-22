@@ -1,3 +1,4 @@
+import type { CubeLut3D } from './cubeLut'
 import type { Adjustments, HslChannel, MatchProfile } from './types'
 
 const HSL_CHANNELS: HslChannel[] = [
@@ -43,6 +44,9 @@ uniform vec4 uBasic0;
 uniform vec4 uBasic1;
 uniform vec4 uBasic2;
 uniform vec4 uMatch;
+uniform vec4 uDetail0;
+uniform vec4 uDetail1;
+uniform vec4 uDetail2;
 uniform float uCurves[20];
 uniform vec3 uHsl[8];
 uniform vec3 uGrade[3];
@@ -53,6 +57,11 @@ uniform vec3 uSourceZones[3];
 uniform vec3 uTargetZones[3];
 uniform vec2 uResolution;
 uniform int uHasProfile;
+uniform highp sampler3D uLut;
+uniform int uHasLut;
+uniform float uLutAmount;
+uniform vec3 uLutDomainMin;
+uniform vec3 uLutDomainMax;
 
 const float PI = 3.14159265358979323846;
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
@@ -298,6 +307,18 @@ vec3 applyBasicAdjustments(vec3 rgb) {
   return saturate3(rgb);
 }
 
+vec3 applyDehaze(vec3 rgb) {
+  float amount = uDetail0.z / 100.0;
+  if (abs(amount) < 0.0001) return rgb;
+  float luma = encodedLuma(rgb);
+  float pivot = 0.42;
+  float contrast = 1.0 + amount * 0.48;
+  rgb = (rgb - vec3(pivot)) * contrast + vec3(pivot - amount * 0.045);
+  float satBoost = 1.0 + amount * 0.28 * (1.0 - saturate(abs(luma - 0.55) * 1.4));
+  float mid = encodedLuma(rgb);
+  return saturate3(vec3(mid) + (rgb - vec3(mid)) * satBoost);
+}
+
 float sampleCurve(float value, int offset) {
   float position = saturate(value) * 4.0;
   int lower = int(floor(position));
@@ -375,14 +396,110 @@ float pseudoRandom(float seed) {
   return fract(sin(seed * 12.9898 + 78.233) * 43758.5453);
 }
 
+vec3 sampleSourceRgb(vec2 uv) {
+  return texture(uSource, vec2(uv.x, 1.0 - uv.y)).rgb;
+}
+
+vec3 blurSource(vec2 uv, float radiusPx) {
+  vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+  vec3 sum = vec3(0.0);
+  float weight = 0.0;
+  for (int oy = -2; oy <= 2; oy += 1) {
+    for (int ox = -2; ox <= 2; ox += 1) {
+      float sampleDist = length(vec2(float(ox), float(oy)));
+      if (sampleDist > radiusPx + 0.01) continue;
+      float w = 1.0 / (1.0 + sampleDist);
+      sum += sampleSourceRgb(uv + vec2(float(ox), float(oy)) * texel * max(radiusPx * 0.5, 1.0)) * w;
+      weight += w;
+    }
+  }
+  return sum / max(weight, 0.0001);
+}
+
+vec3 applySpatialDetail(vec3 rgb, vec2 uv) {
+  float textureAmount = uDetail0.x / 100.0;
+  float clarityAmount = uDetail0.y / 100.0;
+  float sharpenAmount = uDetail0.w / 100.0;
+  float sharpenRadius = clamp(uDetail1.x, 0.5, 3.0);
+  float sharpenDetail = uDetail1.y / 100.0;
+  float sharpenMasking = uDetail1.z / 100.0;
+  float lumaNr = uDetail1.w / 100.0;
+  float colorNr = uDetail2.x / 100.0;
+
+  // Spatial detail is computed from the graded color neighborhood by sampling
+  // the already-graded path is unavailable in a single pass; approximate with
+  // source-neighborhood structure scaled onto current rgb deltas from center.
+  vec3 center = sampleSourceRgb(uv);
+  if (abs(textureAmount) > 0.0001 || abs(clarityAmount) > 0.0001) {
+    vec3 fine = blurSource(uv, 1.0);
+    vec3 broad = blurSource(uv, 2.4);
+    vec3 fineDetail = center - fine;
+    vec3 broadDetail = center - broad;
+    float luma = encodedLuma(rgb);
+    float midMask = 1.0 - saturate(abs(luma - 0.5) * 2.0);
+    rgb += fineDetail * textureAmount * 0.85 + broadDetail * clarityAmount * 0.55 * midMask;
+  }
+
+  if (sharpenAmount > 0.0001) {
+    vec3 blurred = blurSource(uv, sharpenRadius);
+    vec3 detail = center - blurred;
+    float edge = (abs(detail.r) + abs(detail.g) + abs(detail.b)) / 3.0;
+    float mask = sharpenMasking <= 0.001
+      ? 1.0
+      : saturate((edge - sharpenMasking * 0.04) / max(0.02, sharpenMasking * 0.12 + 0.02));
+    float amount = sharpenAmount * (0.55 + sharpenDetail * 0.75);
+    rgb += detail * amount * mask;
+  }
+
+  if (lumaNr > 0.0001 || colorNr > 0.0001) {
+    vec3 blurred = blurSource(uv, 1.0 + max(lumaNr, colorNr));
+    float originalLuma = encodedLuma(rgb);
+    float blurredLuma = encodedLuma(blurred);
+    float mixedLuma = mix(originalLuma, blurredLuma, lumaNr * 0.85);
+    vec3 chroma = rgb - vec3(originalLuma);
+    vec3 blurredChroma = blurred - vec3(blurredLuma);
+    rgb = vec3(mixedLuma) + mix(chroma, blurredChroma, colorNr);
+  }
+
+  return saturate3(rgb);
+}
+
+vec3 applyVignette(vec3 rgb, vec2 uv) {
+  float amount = uDetail2.y / 100.0;
+  if (abs(amount) < 0.0001) return rgb;
+  vec2 centered = (uv - vec2(0.5)) * 2.0;
+  float dist = length(centered);
+  float inner = uDetail2.z / 100.0 * 0.95;
+  float outer = inner + uDetail2.w / 100.0 * 1.15 + 0.08;
+  float t = saturate((dist - inner) / max(0.001, outer - inner));
+  // Avoid the GLSL reserved keyword "smooth".
+  float falloff = t * t * (3.0 - 2.0 * t);
+  return saturate3(rgb * (1.0 + amount * falloff * 0.85));
+}
+
 void main() {
-  vec4 source = texture(uSource, vec2(vUv.x, 1.0 - vUv.y));
+  vec2 uv = vUv;
+  vec4 source = texture(uSource, vec2(uv.x, 1.0 - uv.y));
   vec3 rgb = applyCrossImageTransfer(source.rgb);
   rgb = applyCalibration(rgb);
   rgb = applyBasicAdjustments(rgb);
+  rgb = applyDehaze(rgb);
   rgb = applyCurves(rgb);
   rgb = applyHslAdjustments(rgb);
   rgb = applyColorGrading(rgb);
+  // Skip the expensive neighborhood pass when all detail controls are neutral.
+  if (abs(uDetail0.x) + abs(uDetail0.y) + abs(uDetail0.w)
+    + abs(uDetail1.w) + abs(uDetail2.x) > 0.0001) {
+    rgb = applySpatialDetail(rgb, uv);
+  }
+  rgb = applyVignette(rgb, uv);
+
+  // L2: 3D CUBE in sRGB-encoded domain after local grading (trilinear via sampler3D).
+  if (uHasLut != 0 && uLutAmount > 0.0) {
+    vec3 normalized = (rgb - uLutDomainMin) / max(uLutDomainMax - uLutDomainMin, vec3(1.0e-6));
+    vec3 mapped = texture(uLut, saturate3(normalized)).rgb;
+    rgb = mix(rgb, mapped, clamp(uLutAmount / 100.0, 0.0, 1.0));
+  }
 
   float x = floor(gl_FragCoord.x - 0.5);
   float y = uResolution.y - 1.0 - floor(gl_FragCoord.y - 0.5);
@@ -398,6 +515,9 @@ export interface PackedGpuAdjustments {
   basic1: Float32Array
   basic2: Float32Array
   match: Float32Array
+  detail0: Float32Array
+  detail1: Float32Array
+  detail2: Float32Array
   curves: Float32Array
   hsl: Float32Array
   grade: Float32Array
@@ -458,6 +578,24 @@ export function packGpuAdjustments(adjustments: Adjustments): PackedGpuAdjustmen
       adjustments.colorMatchStrength,
       adjustments.preserveLuma,
       adjustments.skinProtect,
+    ]),
+    detail0: new Float32Array([
+      adjustments.texture,
+      adjustments.clarity,
+      adjustments.dehaze,
+      adjustments.sharpen,
+    ]),
+    detail1: new Float32Array([
+      adjustments.sharpenRadius,
+      adjustments.sharpenDetail,
+      adjustments.sharpenMasking,
+      adjustments.luminanceNoiseReduction,
+    ]),
+    detail2: new Float32Array([
+      adjustments.colorNoiseReduction,
+      adjustments.vignette,
+      adjustments.vignetteMidpoint,
+      adjustments.vignetteFeather,
     ]),
     curves: new Float32Array(curves),
     hsl: new Float32Array(hsl),
@@ -565,9 +703,11 @@ export class GpuPreviewRenderer {
   private readonly sourceTexture: WebGLTexture
   private readonly toneCurveTexture: WebGLTexture
   private readonly toneCdfTexture: WebGLTexture
+  private readonly lutTexture: WebGLTexture
   private readonly uniforms: Record<string, WebGLUniformLocation>
   private readonly vertexArray: WebGLVertexArrayObject
   private profile: MatchProfile | null | undefined
+  private cubeLut: CubeLut3D | null = null
   private width = 0
   private height = 0
   private validated = false
@@ -601,6 +741,9 @@ export class GpuPreviewRenderer {
     this.sourceTexture = createTexture(gl, 0)
     this.toneCurveTexture = createTexture(gl, 1)
     this.toneCdfTexture = createTexture(gl, 2)
+    const lutTexture = gl.createTexture()
+    if (!lutTexture) throw new Error('Unable to create 3D LUT texture')
+    this.lutTexture = lutTexture
     const vertexArray = gl.createVertexArray()
     if (!vertexArray) throw new Error('Unable to create WebGL vertex array')
     this.vertexArray = vertexArray
@@ -608,8 +751,10 @@ export class GpuPreviewRenderer {
 
     const uniformNames = [
       'uSource', 'uToneCurve', 'uToneCdf', 'uBasic0', 'uBasic1', 'uBasic2', 'uMatch',
+      'uDetail0', 'uDetail1', 'uDetail2',
       'uCurves[0]', 'uHsl[0]', 'uGrade[0]', 'uGradeMeta', 'uCalibration0', 'uCalibration1',
       'uSourceZones[0]', 'uTargetZones[0]', 'uResolution', 'uHasProfile',
+      'uLut', 'uHasLut', 'uLutAmount', 'uLutDomainMin', 'uLutDomainMax',
     ]
     for (const name of uniformNames) {
       const location = gl.getUniformLocation(this.program, name)
@@ -621,6 +766,35 @@ export class GpuPreviewRenderer {
     gl.uniform1i(this.uniforms.uSource, 0)
     gl.uniform1i(this.uniforms.uToneCurve, 1)
     gl.uniform1i(this.uniforms.uToneCdf, 2)
+    gl.uniform1i(this.uniforms.uLut, 3)
+    gl.uniform1i(this.uniforms.uHasLut, 0)
+    gl.uniform1f(this.uniforms.uLutAmount, 0)
+    gl.uniform3f(this.uniforms.uLutDomainMin, 0, 0, 0)
+    gl.uniform3f(this.uniforms.uLutDomainMax, 1, 1, 1)
+
+    // Identity 2³ LUT as RGBA8. Float 3D textures + LINEAR often sample black in
+    // WebView2 (no OES_texture_float_linear for 3D); 8-bit is universally filterable.
+    gl.activeTexture(gl.TEXTURE3)
+    gl.bindTexture(gl.TEXTURE_3D, this.lutTexture)
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE)
+    const identity = new Uint8Array(2 * 2 * 2 * 4)
+    let cursor = 0
+    for (let b = 0; b < 2; b += 1) {
+      for (let g = 0; g < 2; g += 1) {
+        for (let r = 0; r < 2; r += 1) {
+          identity[cursor++] = r * 255
+          identity[cursor++] = g * 255
+          identity[cursor++] = b * 255
+          identity[cursor++] = 255
+        }
+      }
+    }
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, 2, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, identity)
 
     const identityToneCurve = new Float32Array(256)
     for (let index = 0; index < identityToneCurve.length; index += 1) {
@@ -640,17 +814,16 @@ export class GpuPreviewRenderer {
     gl.colorMask(true, true, true, true)
   }
 
+  getMaxTextureSize() {
+    if (this.disposed) return 4096
+    return this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE) as number
+  }
+
   setSource(source: ImageData) {
     if (this.disposed) throw new Error('WebGL preview renderer was disposed')
     const { gl } = this
     if (gl.isContextLost()) throw new Error('WebGL preview context was lost')
-    this.width = source.width
-    this.height = source.height
-    this.renderCanvas.width = source.width
-    this.renderCanvas.height = source.height
-    this.canvas.width = source.width
-    this.canvas.height = source.height
-    gl.viewport(0, 0, source.width, source.height)
+    this.bindSourceSize(source.width, source.height)
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture)
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
@@ -675,6 +848,93 @@ export class GpuPreviewRenderer {
     this.validated = false
   }
 
+  /**
+   * Upload a full-resolution HTML image/canvas directly (no getImageData).
+   * Much faster for export than decoding through ImageData first.
+   */
+  setSourceFromBitmap(source: HTMLImageElement | HTMLCanvasElement | ImageBitmap, width: number, height: number) {
+    if (this.disposed) throw new Error('WebGL preview renderer was disposed')
+    const { gl } = this
+    if (gl.isContextLost()) throw new Error('WebGL preview context was lost')
+    this.bindSourceSize(width, height)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture)
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source)
+    const error = gl.getError()
+    if (error !== gl.NO_ERROR) throw new Error(`WebGL source upload failed with error ${error}`)
+    this.validated = false
+  }
+
+  private bindSourceSize(width: number, height: number) {
+    const { gl } = this
+    this.width = width
+    this.height = height
+    this.renderCanvas.width = width
+    this.renderCanvas.height = height
+    this.canvas.width = width
+    this.canvas.height = height
+    gl.viewport(0, 0, width, height)
+  }
+
+  /** Force a complete GPU frame and return the presentation canvas (export path). */
+  renderForExport(adjustments: Adjustments, profile?: MatchProfile | null) {
+    this.render(adjustments, profile)
+    this.gl.finish()
+    const error = this.gl.getError()
+    if (error !== this.gl.NO_ERROR) throw new Error(`WebGL export draw failed with error ${error}`)
+    return this.canvas
+  }
+
+  setCubeLut(lut: CubeLut3D | null) {
+    if (this.disposed) throw new Error('WebGL preview renderer was disposed')
+    const { gl } = this
+    if (gl.isContextLost()) throw new Error('WebGL preview context was lost')
+    this.cubeLut = lut
+    gl.useProgram(this.program)
+    gl.activeTexture(gl.TEXTURE3)
+    gl.bindTexture(gl.TEXTURE_3D, this.lutTexture)
+    if (!lut) {
+      gl.uniform1i(this.uniforms.uHasLut, 0)
+      gl.uniform1f(this.uniforms.uLutAmount, 0)
+      return
+    }
+    // Cube lattice: R fastest, then G, then B (WebGL width=R, height=G, depth=B).
+    // Quantize to 8-bit for reliable LINEAR sampling in WebView2; export still uses float CPU.
+    const count = lut.size * lut.size * lut.size
+    const rgba = new Uint8Array(count * 4)
+    for (let index = 0, out = 0; index < lut.data.length; index += 3, out += 4) {
+      rgba[out] = Math.max(0, Math.min(255, Math.round(lut.data[index] * 255)))
+      rgba[out + 1] = Math.max(0, Math.min(255, Math.round(lut.data[index + 1] * 255)))
+      rgba[out + 2] = Math.max(0, Math.min(255, Math.round(lut.data[index + 2] * 255)))
+      rgba[out + 3] = 255
+    }
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+    gl.texImage3D(
+      gl.TEXTURE_3D,
+      0,
+      gl.RGBA8,
+      lut.size,
+      lut.size,
+      lut.size,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      rgba,
+    )
+    const error = gl.getError()
+    if (error !== gl.NO_ERROR) {
+      // Leave LUT disabled on GPU rather than sampling an invalid texture (black frame).
+      this.cubeLut = null
+      gl.uniform1i(this.uniforms.uHasLut, 0)
+      throw new Error(`WebGL 3D LUT upload failed with error ${error}`)
+    }
+    gl.uniform1i(this.uniforms.uHasLut, 1)
+    gl.uniform3f(this.uniforms.uLutDomainMin, lut.domainMin[0], lut.domainMin[1], lut.domainMin[2])
+    gl.uniform3f(this.uniforms.uLutDomainMax, lut.domainMax[0], lut.domainMax[1], lut.domainMax[2])
+  }
+
   render(adjustments: Adjustments, profile?: MatchProfile | null) {
     if (!this.width || !this.height) return
     if (this.disposed) throw new Error('WebGL preview renderer was disposed')
@@ -689,6 +949,9 @@ export class GpuPreviewRenderer {
     gl.uniform4fv(this.uniforms.uBasic1, packed.basic1)
     gl.uniform4fv(this.uniforms.uBasic2, packed.basic2)
     gl.uniform4fv(this.uniforms.uMatch, packed.match)
+    gl.uniform4fv(this.uniforms.uDetail0, packed.detail0)
+    gl.uniform4fv(this.uniforms.uDetail1, packed.detail1)
+    gl.uniform4fv(this.uniforms.uDetail2, packed.detail2)
     gl.uniform1fv(this.uniforms['uCurves[0]'], packed.curves)
     gl.uniform3fv(this.uniforms['uHsl[0]'], packed.hsl)
     gl.uniform3fv(this.uniforms['uGrade[0]'], packed.grade)
@@ -696,6 +959,14 @@ export class GpuPreviewRenderer {
     gl.uniform4fv(this.uniforms.uCalibration0, packed.calibration0)
     gl.uniform2fv(this.uniforms.uCalibration1, packed.calibration1)
     gl.uniform2f(this.uniforms.uResolution, this.width, this.height)
+    gl.activeTexture(gl.TEXTURE3)
+    gl.bindTexture(gl.TEXTURE_3D, this.lutTexture)
+    gl.uniform1i(this.uniforms.uHasLut, this.cubeLut ? 1 : 0)
+    gl.uniform1f(this.uniforms.uLutAmount, this.cubeLut ? adjustments.lutAmount : 0)
+    if (this.cubeLut) {
+      gl.uniform3f(this.uniforms.uLutDomainMin, this.cubeLut.domainMin[0], this.cubeLut.domainMin[1], this.cubeLut.domainMin[2])
+      gl.uniform3f(this.uniforms.uLutDomainMax, this.cubeLut.domainMax[0], this.cubeLut.domainMax[1], this.cubeLut.domainMax[2])
+    }
 
     if (profile !== this.profile) {
       this.uploadProfile(profile || null)
@@ -724,6 +995,7 @@ export class GpuPreviewRenderer {
     gl.deleteTexture(this.sourceTexture)
     gl.deleteTexture(this.toneCurveTexture)
     gl.deleteTexture(this.toneCdfTexture)
+    gl.deleteTexture(this.lutTexture)
     gl.deleteVertexArray(this.vertexArray)
     gl.deleteProgram(this.program)
   }

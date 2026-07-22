@@ -1,36 +1,45 @@
 ﻿import {
-  Aperture, ArrowRight, Check, CircleHelp, CloudCog, Download, Eye, KeyRound,
-  LoaderCircle, LockKeyhole, Moon, Palette, RotateCcw, Save, ScanSearch, Settings2, SlidersHorizontal,
-  Sparkles, Sun, Upload, WandSparkles, Wifi, WifiOff, X,
+  Aperture, AppWindow, ArrowRight, Check, CircleHelp, CloudCog, Download, FolderKanban, KeyRound,
+  LoaderCircle, LockKeyhole, Minus, Moon, Palette, RotateCcw, Save, ScanSearch, Settings2, SlidersHorizontal,
+  Sparkles, Square, Sun, Upload, WandSparkles, Wifi, WifiOff, X,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { AiColorWorkspace, type AiColorWorkspaceHandle } from './components/AiColorWorkspace'
+import {
+  afterLayerStyle, CompareDivider, CompareModeControls, CompareSlider, previewFrameClass,
+  type CompareMode,
+} from './components/CompareModeControls'
+import { LibrarySettingsPanel } from './components/LibrarySettingsPanel'
 import { ModelSettingsWorkspace } from './components/ModelSettingsWorkspace'
 import { Control } from './components/Control'
 import { Histogram } from './components/Histogram'
 import { FineTunePanels } from './components/FineTunePanels'
 import { ImageDrop } from './components/ImageDrop'
 import {
-  analyzeImageData, createMatchProfile, createModelMatchContext, processImageData, suggestMatchControls,
+  analyzeImageData, createMatchProfile, createModelMatchContext, processImageData,
+  suggestMatchControls,
 } from './lib/colorEngine'
 import {
-  analyzeWithModel, hasProviderApiKey, isTauri, loadModelSettings, persistModelSettings, pickImagePath,
-  readNativeFile, refineMatchWithModel, saveJpegNative,
+  analyzeWithModel, decodeRawNative, hasProviderApiKey, isRawPath, isTauri, loadModelSettings,
+  persistModelSettings, pickImagePath, readNativeFile, refineMatchWithModel, saveJpegNative,
 } from './lib/desktop'
+import { exportGradedImage } from './lib/exportImage'
 import {
-  canvasToBlob, drawImageDataToCanvas, imageToDataUrl, imageToImageData, loadImageBytes,
-  loadImageFile, type LoadedImage,
+  ANALYSIS_MAX_SIDE, canvasToBlob, drawImageDataToCanvas, imageToDataUrl, imageToImageData,
+  imageToViewportImageData, loadImageBytes, loadImageFile, type LoadedImage,
 } from './lib/files'
 import { createDefaultAdjustments, DEFAULT_MODEL_SETTINGS } from './lib/defaults'
 import { GpuPreviewRenderer } from './lib/gpuPreview'
 import { resolveImageModel, resolveVisionModel } from './lib/modelSettings'
 import type { Adjustments, ColorStats, MatchProfile, ModelColorParameters, ModelSettings } from './lib/types'
+import { useElementSize } from './lib/useElementSize'
 import './styles.css'
 
 type Panel = 'match' | 'adjust'
 type WorkspaceMode = 'match' | 'grade' | 'settings'
-type SettingsSection = 'appearance' | 'model'
+type SettingsSection = 'appearance' | 'library' | 'model'
 type ThemeMode = 'light' | 'dark'
 type Toast = { message: string; kind: 'ok' | 'error' }
 type ImageKind = 'source' | 'reference'
@@ -73,7 +82,13 @@ function App() {
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('match')
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance')
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => window.localStorage.getItem('chroma-trace-theme') === 'light' ? 'light' : 'dark')
+  /** Frameless immersive chrome (true) vs OS native decorations (false). Desktop only. */
+  const [integratedWindow, setIntegratedWindow] = useState(
+    () => window.localStorage.getItem('chroma-trace-integrated-window') !== 'false',
+  )
+  const [windowStyleChanging, setWindowStyleChanging] = useState(false)
   const [compare, setCompare] = useState(50)
+  const [compareMode, setCompareMode] = useState<CompareMode>('wipe')
   const [previewEngine, setPreviewEngine] = useState<PreviewEngine>('initializing')
   const [exporting, setExporting] = useState(false)
   const [matchRenderMode, setMatchRenderMode] = useState<MatchRenderMode>('none')
@@ -85,6 +100,7 @@ function App() {
   const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const [gradeExportState, setGradeExportState] = useState({ canExport: false, exporting: false })
+  const [windowMaximized, setWindowMaximized] = useState(false)
   const originalCanvas = useRef<HTMLCanvasElement>(null)
   const gpuResultCanvas = useRef<HTMLCanvasElement>(null)
   const gpuPreviewRenderer = useRef<GpuPreviewRenderer | null>(null)
@@ -96,10 +112,23 @@ function App() {
   const workspaceModeRef = useRef<WorkspaceMode>('match')
   const aiColorWorkspaceRef = useRef<AiColorWorkspaceHandle>(null)
   const helpMenuRef = useRef<HTMLDivElement>(null)
+  const matchPreviewFrameRef = useRef<HTMLDivElement>(null)
 
   sourceRef.current = source
   referenceRef.current = reference
   workspaceModeRef.current = workspaceMode
+
+  const matchFrameSize = useElementSize(matchPreviewFrameRef, workspaceMode === 'match' && Boolean(source))
+  const [stableMatchFrame, setStableMatchFrame] = useState(matchFrameSize)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setStableMatchFrame(matchFrameSize), 80)
+    return () => window.clearTimeout(timer)
+  }, [matchFrameSize.width, matchFrameSize.height])
+  /** Viewport-matched pixels for BEFORE/AFTER (not the analysis thumbnail). */
+  const matchPreviewData = useMemo(() => {
+    if (!source) return null
+    return imageToViewportImageData(source.element, stableMatchFrame.width, stableMatchFrame.height)
+  }, [source, stableMatchFrame.width, stableMatchFrame.height])
 
   const profile = useMemo(
     () => sourceStats && referenceStats
@@ -125,7 +154,33 @@ function App() {
     : matchRenderMode === 'local'
       ? 'LOCAL OKLAB TRANSFER'
       : 'BASIC'
-  const notify = (message: string, kind: Toast['kind'] = 'ok') => setToast({ message, kind })
+  const notify = useCallback((message: string, kind: Toast['kind'] = 'ok') => {
+    setToast({ message, kind })
+  }, [])
+  const changeIntegratedWindow = useCallback(async (nextIntegrated: boolean) => {
+    if (windowStyleChanging || nextIntegrated === integratedWindow) return
+
+    if (!isTauri()) {
+      setIntegratedWindow(nextIntegrated)
+      window.localStorage.setItem('chroma-trace-integrated-window', nextIntegrated ? 'true' : 'false')
+      return
+    }
+
+    setWindowStyleChanging(true)
+    try {
+      const appWindow = getCurrentWindow()
+      await appWindow.setDecorations(!nextIntegrated)
+      const appliedIntegrated = !(await appWindow.isDecorated())
+      if (appliedIntegrated !== nextIntegrated) throw new Error('\u7cfb\u7edf\u672a\u5e94\u7528\u6240\u9009\u7a97\u53e3\u6837\u5f0f')
+
+      setIntegratedWindow(appliedIntegrated)
+      window.localStorage.setItem('chroma-trace-integrated-window', appliedIntegrated ? 'true' : 'false')
+    } catch (error) {
+      notify(errorMessage(error, '\u5207\u6362\u7a97\u53e3\u6837\u5f0f\u5931\u8d25'), 'error')
+    } finally {
+      setWindowStyleChanging(false)
+    }
+  }, [integratedWindow, notify, windowStyleChanging])
   const helpContent = workspaceMode === 'match'
     ? {
         eyebrow: 'AI COLOR MATCH',
@@ -178,6 +233,65 @@ function App() {
   }, [themeMode])
 
   useEffect(() => {
+    if (!isTauri()) return
+
+    let cancelled = false
+    const savedIntegrated = integratedWindow
+    const appWindow = getCurrentWindow()
+    // Restore the saved preference and verify the actual OS decoration state.
+    void appWindow.setDecorations(!savedIntegrated)
+      .then(() => appWindow.isDecorated())
+      .then((decorated) => {
+        if (cancelled) return
+        const appliedIntegrated = !decorated
+        if (appliedIntegrated !== savedIntegrated) {
+          setIntegratedWindow(appliedIntegrated)
+          window.localStorage.setItem('chroma-trace-integrated-window', appliedIntegrated ? 'true' : 'false')
+        }
+      })
+      .catch(async (error) => {
+        if (cancelled) return
+        try {
+          const appliedIntegrated = !(await appWindow.isDecorated())
+          if (!cancelled) {
+            setIntegratedWindow(appliedIntegrated)
+            window.localStorage.setItem('chroma-trace-integrated-window', appliedIntegrated ? 'true' : 'false')
+          }
+        } catch {
+          // Keep the saved value if the host cannot report its decoration state.
+        }
+        if (!cancelled) notify(errorMessage(error, '\u6062\u590d\u7a97\u53e3\u6837\u5f0f\u5931\u8d25'), 'error')
+      })
+
+    return () => { cancelled = true }
+    // This synchronizes the persisted preference once when the desktop shell mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (!isTauri()) return
+    const appWindow = getCurrentWindow()
+    let unlisten: (() => void) | undefined
+    void appWindow.isMaximized().then(setWindowMaximized).catch(() => undefined)
+    void appWindow.onResized(() => {
+      void appWindow.isMaximized().then(setWindowMaximized).catch(() => undefined)
+    }).then((fn) => { unlisten = fn }).catch(() => undefined)
+    return () => unlisten?.()
+  }, [])
+
+  const windowControl = async (action: 'minimize' | 'toggleMaximize' | 'close') => {
+    if (!isTauri()) return
+    const appWindow = getCurrentWindow()
+    try {
+      if (action === 'minimize') await appWindow.minimize()
+      else if (action === 'toggleMaximize') await appWindow.toggleMaximize()
+      else await appWindow.close()
+    } catch {
+      // Window controls are best-effort in constrained hosts.
+    }
+  }
+
+  useEffect(() => {
     setHelpOpen(false)
   }, [workspaceMode])
 
@@ -198,43 +312,53 @@ function App() {
   }, [helpOpen])
 
   useEffect(() => {
-    if (workspaceMode !== 'match' || !sourceData || !originalCanvas.current) return
-    drawImageDataToCanvas(originalCanvas.current, sourceData)
-  }, [workspaceMode, sourceData])
+    if (workspaceMode !== 'match' || !matchPreviewData || !originalCanvas.current) return
+    drawImageDataToCanvas(originalCanvas.current, matchPreviewData)
+  }, [workspaceMode, matchPreviewData])
 
   useEffect(() => {
-    if (workspaceMode !== 'match' || !sourceData || !gpuResultCanvas.current) return
+    if (workspaceMode !== 'match' || !matchPreviewData || !gpuResultCanvas.current) return
 
     setPreviewEngine('initializing')
     let renderer: GpuPreviewRenderer | null = null
     let initializationFrame: number | null = null
     let disposed = false
     const canvas = gpuResultCanvas.current
+    const sourceImage = matchPreviewData
+    const initialAdjustments = adjustments
+    const initialProfile = activeMatchProfile
+
+    const paintCpuPreview = () => {
+      drawImageDataToCanvas(canvas, processImageData(sourceImage, initialAdjustments, initialProfile))
+    }
+
+    const fallbackToCpu = (error: unknown) => {
+      console.error('WebGL2 preview failed; falling back to CPU.', error)
+      renderer?.dispose()
+      renderer = null
+      gpuPreviewRenderer.current = null
+      if (!disposed) {
+        paintCpuPreview()
+        setPreviewEngine('error')
+      }
+    }
 
     try {
       renderer = new GpuPreviewRenderer(canvas)
-      renderer.setSource(sourceData)
+      renderer.setSource(sourceImage)
       initializationFrame = window.requestAnimationFrame(() => {
         initializationFrame = null
         if (disposed || !renderer) return
         try {
-          renderer.render(adjustments, activeMatchProfile)
+          renderer.render(initialAdjustments, initialProfile)
           gpuPreviewRenderer.current = renderer
           setPreviewEngine('gpu')
         } catch (error) {
-          console.error('WebGL2 preview initialization failed.', error)
-          renderer.dispose()
-          renderer = null
-          gpuPreviewRenderer.current = null
-          setPreviewEngine('error')
+          fallbackToCpu(error)
         }
       })
     } catch (error) {
-      console.error('WebGL2 preview initialization failed.', error)
-      renderer?.dispose()
-      renderer = null
-      gpuPreviewRenderer.current = null
-      setPreviewEngine('error')
+      fallbackToCpu(error)
     }
 
     return () => {
@@ -250,28 +374,39 @@ function App() {
       if (gpuPreviewRenderer.current === activeRenderer) gpuPreviewRenderer.current = null
       pendingGpuPreview.current = null
     }
-  }, [workspaceMode, sourceData])
+  }, [workspaceMode, matchPreviewData])
 
   useEffect(() => {
     pendingGpuPreview.current = { adjustments, profile: activeMatchProfile }
-    if (!gpuPreviewRenderer.current || previewFrame.current !== null) return
+    if (workspaceMode !== 'match' || !matchPreviewData || previewFrame.current !== null) return
 
     previewFrame.current = window.requestAnimationFrame(() => {
       previewFrame.current = null
-      const renderer = gpuPreviewRenderer.current
       const pending = pendingGpuPreview.current
-      if (!renderer || !pending) return
-      try {
-        renderer.render(pending.adjustments, pending.profile)
-      } catch (error) {
-        console.error('WebGL2 preview render failed.', error)
-        renderer.dispose()
-        if (gpuPreviewRenderer.current === renderer) gpuPreviewRenderer.current = null
-        pendingGpuPreview.current = null
-        setPreviewEngine('error')
+      if (!pending) return
+
+      const renderer = gpuPreviewRenderer.current
+      if (renderer && previewEngine === 'gpu') {
+        try {
+          renderer.render(pending.adjustments, pending.profile)
+          return
+        } catch (error) {
+          console.error('WebGL2 preview render failed; falling back to CPU.', error)
+          renderer.dispose()
+          if (gpuPreviewRenderer.current === renderer) gpuPreviewRenderer.current = null
+          pendingGpuPreview.current = null
+          setPreviewEngine('error')
+        }
+      }
+
+      if (previewEngine === 'error' || !gpuPreviewRenderer.current) {
+        drawImageDataToCanvas(
+          gpuResultCanvas.current!,
+          processImageData(matchPreviewData, pending.adjustments, pending.profile),
+        )
       }
     })
-  }, [adjustments, activeMatchProfile, previewEngine])
+  }, [workspaceMode, matchPreviewData, adjustments, activeMatchProfile, previewEngine])
 
   useEffect(() => {
     if (!isTauri()) return
@@ -299,7 +434,8 @@ function App() {
   }, [])
 
   const assignImage = (loaded: LoadedImage, kind: ImageKind) => {
-    const data = imageToImageData(loaded.element, 1200)
+    // Stats / match profile use a fixed analysis budget; on-screen preview is viewport-sized separately.
+    const data = imageToImageData(loaded.element, ANALYSIS_MAX_SIDE)
     setAdjustments(createDefaultAdjustments())
     if (kind === 'source') {
       if (sourceRef.current) URL.revokeObjectURL(sourceRef.current.url)
@@ -326,8 +462,16 @@ function App() {
 
   async function handleNativePath(path: string, kind: ImageKind) {
     try {
+      const name = fileNameFromPath(path)
+      if (isRawPath(path)) {
+        notify('正在解码相机 RAW…')
+        const jpegBytes = await decodeRawNative(path, 4000)
+        assignImage(await loadImageBytes(jpegBytes, name.replace(/\.[^.]+$/, '') + '.jpg', path, { fromRaw: true }), kind)
+        notify(kind === 'source' ? 'RAW 原片已解码为 sRGB 预览' : 'RAW 参考图已解码为 sRGB 预览')
+        return
+      }
       const bytes = await readNativeFile(path)
-      assignImage(await loadImageBytes(bytes, fileNameFromPath(path), path), kind)
+      assignImage(await loadImageBytes(bytes, name, path), kind)
     } catch (error) { notify(errorMessage(error, '本地图片读取失败'), 'error') }
   }
 
@@ -476,15 +620,16 @@ function App() {
     if (!source || !reference || matchRenderMode === 'none') return notify('请先完成追色', 'error')
     setExporting(true)
     try {
-      const exportData = imageToImageData(source.element, 2400)
-      const processed = processImageData(exportData, adjustments, activeMatchProfile)
-      const canvas = document.createElement('canvas')
-      drawImageDataToCanvas(canvas, processed)
-      const blob = await canvasToBlob(canvas, .94)
-      const bytes = new Uint8Array(await blob.arrayBuffer())
+      // Full native resolution via GPU (CPU fallback). No 2400px preview-style cap.
+      const result = await exportGradedImage(source.element, adjustments, {
+        profile: activeMatchProfile,
+        quality: 0.92,
+      })
       const defaultName = `${source.name.replace(/\.[^.]+$/, '')}-chromatrace.jpg`
-      const saved = await saveJpegNative(bytes, defaultName)
-      if (saved) notify('JPEG 效果图已导出')
+      const saved = await saveJpegNative(result.bytes, defaultName)
+      if (saved) {
+        notify(`JPEG 已导出 · ${result.width}×${result.height} · ${result.engine.toUpperCase()}`)
+      }
     } catch (error) { notify(errorMessage(error, '导出失败'), 'error') }
     finally { setExporting(false) }
   }
@@ -496,12 +641,12 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isTauri() ? 'app-shell--compact' : ''} ${isTauri() && integratedWindow ? 'app-shell--integrated' : ''} ${windowMaximized && integratedWindow ? 'is-maximized' : ''}`}>
       <input
         ref={browserSourceInput}
         className="visually-hidden"
         type="file"
-        accept="image/jpeg,image/png,image/webp"
+        accept="image/jpeg,image/png,image/webp,.cr2,.cr3,.nef,.nrw,.arw,.raf,.orf,.rw2,.pef,.dng,.raw"
         tabIndex={-1}
         onChange={(event) => {
           const file = event.target.files?.[0]
@@ -510,9 +655,18 @@ function App() {
         }}
       />
       <header className="topbar">
-        <div className="brand">
-          <span className="brand__mark"><Aperture size={20} strokeWidth={1.7} /></span>
-          <div><strong>色迹</strong><span>CHROMA TRACE</span></div>
+        <div
+          className="brand"
+          {...(integratedWindow ? {
+            'data-tauri-drag-region': true,
+            onDoubleClick: () => void windowControl('toggleMaximize'),
+          } : {})}
+        >
+          <span className="brand__mark" {...(integratedWindow ? { 'data-tauri-drag-region': true } : {})}><Aperture size={18} strokeWidth={1.7} /></span>
+          <div {...(integratedWindow ? { 'data-tauri-drag-region': true } : {})}>
+            <strong {...(integratedWindow ? { 'data-tauri-drag-region': true } : {})}>色迹</strong>
+            <span {...(integratedWindow ? { 'data-tauri-drag-region': true } : {})}>CHROMA TRACE</span>
+          </div>
         </div>
         <nav className="workspace-nav" aria-label="工作区导航">
           <button className={workspaceMode === 'match' ? 'is-active' : ''} onClick={() => { setWorkspaceMode('match'); setPanel('match') }}><ScanSearch size={15}/> AI 追色</button>
@@ -520,7 +674,12 @@ function App() {
           <button className={workspaceMode === 'settings' ? 'is-active' : ''} onClick={() => setWorkspaceMode('settings')}><Settings2 size={15}/> 设置</button>
         </nav>
         <div className="topbar__actions">
-          <span className={`privacy-pill ${modelSettings.enabled ? 'is-cloud' : ''}`}>
+          {workspaceMode !== 'settings' ? (
+            <>
+              <span
+                className={`privacy-pill ${modelSettings.enabled ? 'is-cloud' : ''}`}
+            {...(integratedWindow ? { 'data-tauri-drag-region': true } : {})}
+          >
             {modelSettings.enabled ? <CloudCog size={13}/> : <LockKeyhole size={13}/>} 
             {modelSettings.enabled ? '增强模式会发送缩略图' : '图片仅在本机处理'}
           </span>
@@ -555,7 +714,9 @@ function App() {
                 <p>{helpContent.note}</p>
               </section>
             ) : null}
-          </div>
+              </div>
+            </>
+          ) : null}
           {workspaceMode !== 'settings' ? (
             <button
               className="button button--light topbar-export"
@@ -567,6 +728,19 @@ function App() {
               {exportBusy ? <LoaderCircle className="spin" size={15}/> : <Download size={15}/>}
               <span>{exportBusy ? '正在导出' : '导出效果图'}</span>
             </button>
+          ) : null}
+          {isTauri() && integratedWindow ? (
+            <div className="window-controls" role="group" aria-label="窗口控制">
+              <button type="button" className="window-control" title="最小化" aria-label="最小化" onClick={() => void windowControl('minimize')}>
+                <Minus size={14} strokeWidth={2.2} />
+              </button>
+              <button type="button" className="window-control" title={windowMaximized ? '向下还原' : '最大化'} aria-label={windowMaximized ? '向下还原' : '最大化'} onClick={() => void windowControl('toggleMaximize')}>
+                {windowMaximized ? <span className="window-control__restore" aria-hidden="true" /> : <Square size={12} strokeWidth={2.2} />}
+              </button>
+              <button type="button" className="window-control window-control--close" title="关闭" aria-label="关闭" onClick={() => void windowControl('close')}>
+                <X size={14} strokeWidth={2.2} />
+              </button>
+            </div>
           ) : null}
         </div>
       </header>
@@ -591,12 +765,15 @@ function App() {
         />
       ) : workspaceMode === 'settings' ? (
         <main className="settings-workspace">
-          <aside className="settings-sidebar">
-            <div className="settings-sidebar__heading">
-              <span className="kicker">APPLICATION</span>
-              <h1>设置</h1>
-              <p>集中管理色迹的应用能力与外部服务。</p>
-            </div>
+          <aside className="settings-rail" aria-label="设置导航">
+            <header className="settings-rail__head">
+              <span className="settings-rail__mark"><Settings2 size={16}/></span>
+              <div>
+                <span className="kicker">CONTROL ROOM</span>
+                <h1>设置</h1>
+              </div>
+            </header>
+
             <nav className="settings-nav" aria-label="设置模块">
               <button
                 type="button"
@@ -604,8 +781,27 @@ function App() {
                 aria-current={settingsSection === 'appearance' ? 'page' : undefined}
                 onClick={() => setSettingsSection('appearance')}
               >
-                <span className="settings-nav__icon">{themeMode === 'dark' ? <Moon size={17}/> : <Sun size={17}/>}</span>
-                <span><strong>外观</strong><small>夜间模式与界面主题</small></span>
+                <span className="settings-nav__index">01</span>
+                <span className="settings-nav__icon">{themeMode === 'dark' ? <Moon size={16} /> : <Sun size={16} />}</span>
+                <span className="settings-nav__copy">
+                  <strong>外观</strong>
+                  <small>主题 · 一体式窗口</small>
+                </span>
+                <em className="settings-nav__chip">{themeMode === 'dark' ? '夜间' : '日间'}</em>
+              </button>
+              <button
+                type="button"
+                className={settingsSection === 'library' ? 'is-active' : ''}
+                aria-current={settingsSection === 'library' ? 'page' : undefined}
+                onClick={() => setSettingsSection('library')}
+              >
+                <span className="settings-nav__index">02</span>
+                <span className="settings-nav__icon"><FolderKanban size={16}/></span>
+                <span className="settings-nav__copy">
+                  <strong>资料库</strong>
+                  <small>XMP · CUBE · 排序</small>
+                </span>
+                <em className="settings-nav__chip">本地</em>
               </button>
               <button
                 type="button"
@@ -613,136 +809,310 @@ function App() {
                 aria-current={settingsSection === 'model' ? 'page' : undefined}
                 onClick={() => setSettingsSection('model')}
               >
-                <span className="settings-nav__icon"><CloudCog size={17}/></span>
-                <span><strong>模型设置</strong><small>供应商、模型与安全凭据</small></span>
+                <span className="settings-nav__index">03</span>
+                <span className="settings-nav__icon"><CloudCog size={16}/></span>
+                <span className="settings-nav__copy">
+                  <strong>模型</strong>
+                  <small>供应商 · 凭据 · 路由</small>
+                </span>
+                <em className={`settings-nav__chip ${modelSettings.enabled ? 'is-on' : ''}`}>
+                  {modelSettings.enabled ? '启用' : '离线'}
+                </em>
               </button>
             </nav>
-            <div className="settings-sidebar__footer"><LockKeyhole size={13}/><span>本地优先 · 凭据安全存储</span></div>
-          </aside>
 
-          {settingsSection === 'appearance' ? (
-            <section className="appearance-settings-workspace settings-module">
-              <header className="appearance-settings-hero">
-                <span className="settings-breadcrumb">设置 <i>/</i> 外观</span>
-                <span className="kicker">APPEARANCE / DISPLAY</span>
-                <h2>外观</h2>
-                <p>在日间与夜间界面之间切换，主题偏好会自动保存在当前设备。</p>
-              </header>
-              <div className="appearance-settings-scroll">
-                <section className="module appearance-settings-card">
-                  <div className="module__heading"><div><span className="kicker">COLOR SCHEME</span><h3>界面主题</h3></div>{themeMode === 'dark' ? <Moon size={17}/> : <Sun size={17}/>}</div>
-                  <label className="toggle-row appearance-mode-toggle">
-                    <span><strong>夜间模式</strong><small>降低界面亮度，适合暗光环境下调色</small></span>
-                    <input type="checkbox" checked={themeMode === 'dark'} onChange={(event) => setThemeMode(event.target.checked ? 'dark' : 'light')} />
-                  </label>
-                  <div className="theme-choice-grid" role="radiogroup" aria-label="界面主题">
-                    <button type="button" role="radio" aria-checked={themeMode === 'light'} className={themeMode === 'light' ? 'is-active' : ''} onClick={() => setThemeMode('light')}>
-                      <span className="theme-swatch theme-swatch--light"><i/><i/><i/></span>
-                      <span><Sun size={14}/><strong>日间</strong><small>明亮中性</small></span>
-                    </button>
-                    <button type="button" role="radio" aria-checked={themeMode === 'dark'} className={themeMode === 'dark' ? 'is-active' : ''} onClick={() => setThemeMode('dark')}>
-                      <span className="theme-swatch theme-swatch--dark"><i/><i/><i/></span>
-                      <span><Moon size={14}/><strong>夜间</strong><small>低亮度专注模式</small></span>
-                    </button>
-                  </div>
-                  <p className="appearance-note">主题切换只影响应用界面，不会改变图片预览、调色计算或导出结果。</p>
-                </section>
+            <section className="settings-rail__status" aria-label="当前配置摘要">
+              <div>
+                <span>模型能力</span>
+                <strong className={modelSettings.enabled ? 'is-on' : ''}>{modelSettings.enabled ? '已启用' : '已关闭'}</strong>
+              </div>
+              <div>
+                <span>视觉路由</span>
+                <strong>{activeVisionModel?.name || '未选择'}</strong>
+              </div>
+              <div>
+                <span>图像路由</span>
+                <strong>{activeImageModel?.name || '未选择'}</strong>
+              </div>
+              <div>
+                <span>主题</span>
+                <strong>{themeMode === 'dark' ? '夜间模式' : '日间模式'}</strong>
               </div>
             </section>
-          ) : settingsSection === 'model' ? (
-            <ModelSettingsWorkspace
-              settings={modelSettings}
-              credentialStatus={credentialStatus}
-              settingsLoaded={settingsLoaded}
-              onChange={setModelSettings}
-              onCredentialStatusChange={(providerId, present) => setCredentialStatus((current) => ({ ...current, [providerId]: present }))}
-              notify={notify}
-            />
-          ) : null}
+
+            <footer className="settings-rail__foot">
+              <LockKeyhole size={13}/>
+              <span>本地优先 · API Key 存于 Windows 凭据管理器</span>
+            </footer>
+          </aside>
+
+          <div className="settings-main">
+            {settingsSection === 'appearance' ? (
+              <section className="settings-panel appearance-panel">
+                <header className="settings-panel__head">
+                  <div>
+                    <span className="settings-panel__crumb">设置 / 外观</span>
+                    <h2>外观</h2>
+                    <p>调整界面主题与桌面窗口样式。这些选项只影响应用外壳与 UI，不会改动预览与导出结果。</p>
+                  </div>
+                  <div className={`settings-panel__pulse ${themeMode === 'dark' ? 'is-dark' : 'is-light'}`}>
+                    {themeMode === 'dark' ? <Moon size={16} /> : <Sun size={16} />}
+                    <span>
+                      <strong>{themeMode === 'dark' ? '夜间模式' : '日间模式'}</strong>
+                      <small>已应用到当前设备</small>
+                    </span>
+                  </div>
+                </header>
+
+                <div className="settings-panel__body">
+                  <section className="settings-card appearance-theme-card">
+                    <div className="settings-card__head">
+                      <div>
+                        <span className="kicker">DISPLAY THEME</span>
+                        <h3>界面主题</h3>
+                      </div>
+                    </div>
+
+                    <div className="theme-stage" role="radiogroup" aria-label="界面主题">
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={themeMode === 'light'}
+                        className={`theme-tile ${themeMode === 'light' ? 'is-active' : ''}`}
+                        onClick={() => setThemeMode('light')}
+                      >
+                        <span className="theme-tile__preview theme-tile__preview--light" aria-hidden="true">
+                          <i className="theme-tile__bar"/><i className="theme-tile__side"/><i className="theme-tile__stage"/><i className="theme-tile__rail"/>
+                        </span>
+                        <span className="theme-tile__meta">
+                          <Sun size={15}/>
+                          <span><strong>日间</strong><small>明亮中性，适合白天审片</small></span>
+                          {themeMode === 'light' ? <Check size={14} className="theme-tile__check"/> : null}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={themeMode === 'dark'}
+                        className={`theme-tile ${themeMode === 'dark' ? 'is-active' : ''}`}
+                        onClick={() => setThemeMode('dark')}
+                      >
+                        <span className="theme-tile__preview theme-tile__preview--dark" aria-hidden="true">
+                          <i className="theme-tile__bar"/><i className="theme-tile__side"/><i className="theme-tile__stage"/><i className="theme-tile__rail"/>
+                        </span>
+                        <span className="theme-tile__meta">
+                          <Moon size={15}/>
+                          <span><strong>夜间</strong><small>低亮度，适合暗光调色</small></span>
+                          {themeMode === 'dark' ? <Check size={14} className="theme-tile__check"/> : null}
+                        </span>
+                      </button>
+                    </div>
+
+                    <p className="settings-card__note">
+                      主题偏好会自动保存在本机。切换后立即生效，无需重启应用。
+                    </p>
+                  </section>
+
+                  {isTauri() ? (
+                    <section className="settings-card appearance-window-card">
+                      <div className="settings-card__head">
+                        <div>
+                          <span className="kicker">WINDOW CHROME</span>
+                          <h3>一体式窗口</h3>
+                        </div>
+                      </div>
+
+                      <div className="window-style-stage" role="radiogroup" aria-label="窗口样式">
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={integratedWindow}
+                          aria-busy={windowStyleChanging}
+                          disabled={windowStyleChanging}
+                          className={`window-style-tile ${integratedWindow ? 'is-active' : ''}`}
+                          onClick={() => void changeIntegratedWindow(true)}
+                        >
+                          <span className="window-style-tile__preview window-style-tile__preview--integrated" aria-hidden="true">
+                            <i className="window-style-tile__chrome"/><i className="window-style-tile__body"/><i className="window-style-tile__btn"/><i className="window-style-tile__btn"/><i className="window-style-tile__btn"/>
+                          </span>
+                          <span className="window-style-tile__meta">
+                            <AppWindow size={15}/>
+                            <span><strong>一体式</strong><small>无系统标题栏，顶栏与内容融为一体</small></span>
+                            {integratedWindow ? <Check size={14} className="window-style-tile__check"/> : null}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={!integratedWindow}
+                          aria-busy={windowStyleChanging}
+                          disabled={windowStyleChanging}
+                          className={`window-style-tile ${!integratedWindow ? 'is-active' : ''}`}
+                          onClick={() => void changeIntegratedWindow(false)}
+                        >
+                          <span className="window-style-tile__preview window-style-tile__preview--native" aria-hidden="true">
+                            <i className="window-style-tile__os-bar"/><i className="window-style-tile__body"/><i className="window-style-tile__os-btn"/><i className="window-style-tile__os-btn"/><i className="window-style-tile__os-btn"/>
+                          </span>
+                          <span className="window-style-tile__meta">
+                            <Square size={15}/>
+                            <span><strong>原生窗口</strong><small>使用系统标题栏与窗口边框</small></span>
+                            {!integratedWindow ? <Check size={14} className="window-style-tile__check"/> : null}
+                          </span>
+                        </button>
+                      </div>
+
+                      <p className="settings-card__note">
+                        开启一体式后隐藏系统标题栏，使用应用内顶栏与自定义窗口按钮；关闭后恢复系统原生边框。偏好会保存在本机，切换后立即生效。
+                      </p>
+                    </section>
+                  ) : null}
+                </div>
+              </section>
+            ) : settingsSection === 'library' ? (
+              <LibrarySettingsPanel notify={notify} />
+            ) : (
+              <ModelSettingsWorkspace
+                settings={modelSettings}
+                credentialStatus={credentialStatus}
+                settingsLoaded={settingsLoaded}
+                onChange={setModelSettings}
+                onCredentialStatusChange={(providerId, present) => setCredentialStatus((current) => ({ ...current, [providerId]: present }))}
+                notify={notify}
+              />
+            )}
+          </div>
         </main>
       ) : (
       <main className="workspace-layout workspace">
-        <aside className="workspace-rail workspace-rail--left input-rail">
-          <div className="rail-heading">
-            <div><span className="kicker">INPUT / 01</span><h2>匹配样本</h2></div>
-            <span className={`status-dot ${profile ? 'is-ready' : ''}`}>{profile ? 'READY' : 'WAIT'}</span>
-          </div>
-          <section className="grade-step match-step">
-            <div className="grade-step__head"><span>01</span><div><strong>选择原片</strong><small>JPG · PNG · WebP</small></div></div>
-            <ImageDrop
-              title="载入需要调色的原片" eyebrow="SOURCE / 原片" image={source} accent="source"
-              onFile={(file) => void handleFile(file, 'source')}
-              onPick={isTauri() ? () => void pickNativeImage('source') : undefined}
-              onClear={() => clearImage('source')}
-            />
-          </section>
-
-          <div className="direction-mark"><span/><ArrowRight size={16}/><span/></div>
-
-          <section className="grade-step match-step">
-            <div className="grade-step__head"><span>02</span><div><strong>选择参考图</strong><small>风格样本 · 无需同图</small></div></div>
-            <ImageDrop
-              title="载入想要模仿的色彩" eyebrow="REFERENCE / 参考" image={reference} accent="reference"
-              onFile={(file) => void handleFile(file, 'reference')}
-              onPick={isTauri() ? () => void pickNativeImage('reference') : undefined}
-              onClear={() => clearImage('reference')}
-            />
-          </section>
-
-          <section className="grade-step match-step match-step--analysis">
-            <div className="grade-step__head"><span>03</span><div><strong>样本分析</strong><small>亮度 · 色彩 · 通道关系</small></div></div>
-            <div className="analysis-card">
-              <div className="analysis-card__head"><span>色彩样本分析</span><span>{profile ? '2 / 2' : source || reference ? '1 / 2' : '0 / 2'}</span></div>
-              <Histogram values={referenceStats?.histogram || sourceStats?.histogram} />
-              <div className="swatch-row">
-                <div><i style={{ background: toHex(sourceStats) }}/><span>原片均值</span><b>{toHex(sourceStats).toUpperCase()}</b></div>
-                <div><i style={{ background: toHex(referenceStats) }}/><span>目标均值</span><b>{toHex(referenceStats).toUpperCase()}</b></div>
-              </div>
+        <aside className="workspace-rail workspace-rail--left input-rail left-console">
+          <header className="left-console__head">
+            <div className="rail-heading">
+              <div><span className="kicker">MATCH / INPUT</span><h2>匹配样本</h2></div>
+              <span className={`status-dot ${profile ? 'is-ready' : ''}`}>{profile ? 'READY' : 'WAIT'}</span>
             </div>
-          </section>
-          <button type="button" className="match-button" disabled={!profile || modelBusy || !modelSettings.enabled} onClick={runModelMatch}>
-            {modelTask === 'analyze' ? <LoaderCircle className="spin" size={17}/> : <WandSparkles size={17}/>}
-            <span><strong>开始 AI 语义追色</strong><small>双图对比并生成源图适配配方</small></span><ArrowRight size={17}/>
-          </button>
+            <ol className="rail-progress" aria-label="追色准备进度">
+              <li className={source ? 'is-done' : 'is-current'}><i>1</i><span>原片</span></li>
+              <li className={reference ? 'is-done' : source ? 'is-current' : ''}><i>2</i><span>参考</span></li>
+              <li className={profile ? 'is-done' : source && reference ? 'is-current' : ''}><i>3</i><span>分析</span></li>
+            </ol>
+          </header>
+
+          <div className="left-console__body">
+            <section className="rail-card">
+              <div className="rail-card__head">
+                <span className="rail-card__index">01</span>
+                <div><strong>双图样本</strong><small>原片与参考可不同构图</small></div>
+              </div>
+              <div className="match-pair">
+                <div className="match-pair__slot">
+                  <div className="match-pair__label"><span>SOURCE</span><b>{source ? '已载入' : '待选择'}</b></div>
+                  <ImageDrop
+                    title="选择原片" eyebrow="SOURCE" image={source} accent="source"
+                    onFile={(file) => void handleFile(file, 'source')}
+                    onPick={isTauri() ? () => void pickNativeImage('source') : undefined}
+                    onClear={() => clearImage('source')}
+                  />
+                </div>
+                <div className="match-pair__bridge" aria-hidden="true"><ArrowRight size={14}/></div>
+                <div className="match-pair__slot">
+                  <div className="match-pair__label match-pair__label--ref"><span>REFERENCE</span><b>{reference ? '已载入' : '待选择'}</b></div>
+                  <ImageDrop
+                    title="选择参考" eyebrow="REFERENCE" image={reference} accent="reference"
+                    onFile={(file) => void handleFile(file, 'reference')}
+                    onPick={isTauri() ? () => void pickNativeImage('reference') : undefined}
+                    onClear={() => clearImage('reference')}
+                  />
+                </div>
+              </div>
+            </section>
+
+            <section className="rail-card">
+              <div className="rail-card__head">
+                <span className="rail-card__index">02</span>
+                <div><strong>样本分析</strong><small>亮度 · 色彩 · 通道关系</small></div>
+                <em className="rail-card__meta">{profile ? '2 / 2' : source || reference ? '1 / 2' : '0 / 2'}</em>
+              </div>
+              <div className="analysis-card analysis-card--compact">
+                <Histogram values={referenceStats?.histogram || sourceStats?.histogram} />
+                <div className="swatch-row">
+                  <div><i style={{ background: toHex(sourceStats) }}/><span>原片均值</span><b>{toHex(sourceStats).toUpperCase()}</b></div>
+                  <div><i style={{ background: toHex(referenceStats) }}/><span>目标均值</span><b>{toHex(referenceStats).toUpperCase()}</b></div>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <footer className="left-console__foot">
+            <button type="button" className="match-button" disabled={!profile || modelBusy || !modelSettings.enabled} onClick={runModelMatch}>
+              {modelTask === 'analyze' ? <LoaderCircle className="spin" size={17}/> : <WandSparkles size={17}/>}
+              <span><strong>开始 AI 语义追色</strong><small>双图对比并生成源图适配配方</small></span><ArrowRight size={17}/>
+            </button>
+          </footer>
         </aside>
 
         <section className="workspace-stage stage">
           <div className="stage__toolbar">
             <div className="stage__title"><span className="kicker">PREVIEW / 04</span><strong>{source?.name || '等待载入原片'}</strong></div>
-            <div className="view-switch">
-              <span>对比</span>
-              <input aria-label="前后效果对比" type="range" min="0" max="100" value={compare} onChange={(e) => setCompare(Number(e.target.value))}/>
-              <output>{compare}%</output>
-            </div>
+            {compareMode === 'toggle' ? (
+              <CompareSlider
+                value={compare}
+                onChange={setCompare}
+                label="前后"
+                disabled={!hasResult}
+              />
+            ) : (
+              <div className="view-switch view-switch--hint"><span>{compareMode === 'wipe' ? '拖动预览分割线' : compareMode === 'side' ? '左右分屏' : '上下分屏'}</span></div>
+            )}
             <div className="stage__tools">
+              <CompareModeControls mode={compareMode} onChange={setCompareMode} disabled={!sourceData} />
               <button className="icon-button" title="重置" onClick={reset}><RotateCcw size={16}/></button>
             </div>
           </div>
 
-          <div className={`preview-frame ${sourceData ? 'has-image' : ''}`}>
+          <div
+            ref={matchPreviewFrameRef}
+            className={previewFrameClass(compareMode, Boolean(sourceData), hasResult)}
+          >
             {sourceData ? (
               <>
-                <canvas ref={originalCanvas} className="preview-canvas preview-canvas--before" />
-                <div className="preview-after" style={{ clipPath: `inset(0 0 0 ${compare}%)` }}>
-                  <canvas ref={gpuResultCanvas} className="preview-canvas" />
+                <div className="preview-layer preview-layer--before">
+                  <canvas ref={originalCanvas} className="preview-canvas preview-canvas--before" />
                 </div>
-                <div className="compare-line" style={{ left: `${compare}%` }}><span><Eye size={13}/></span></div>
-                <span className="preview-label preview-label--before">BEFORE</span>
-                <span className="preview-label preview-label--after">AFTER</span>
+                {hasResult ? (
+                  <div className="preview-layer preview-layer--after preview-after" style={afterLayerStyle(compareMode, compare, true)}>
+                    <canvas ref={gpuResultCanvas} className="preview-canvas" />
+                  </div>
+                ) : null}
+                {hasResult && compareMode !== 'toggle' ? (
+                  <CompareDivider
+                    mode={compareMode}
+                    value={compare}
+                    onChange={setCompare}
+                    frameRef={matchPreviewFrameRef}
+                  />
+                ) : null}
+                {!(compareMode === 'toggle' && compare >= 50) ? (
+                  <span className="preview-label preview-label--before">BEFORE</span>
+                ) : null}
+                {hasResult && !(compareMode === 'toggle' && compare < 50) ? (
+                  <span className="preview-label preview-label--after">AFTER</span>
+                ) : null}
               </>
             ) : (
               <div className="empty-stage">
-                <div className="empty-stage__reticle"><span/><Aperture size={38} strokeWidth={1}/><span/></div>
-                <span className="kicker">WINDOWS LOCAL COLOR ENGINE</span>
-                <h1>把一种色彩记忆<br/>移植到另一张照片</h1>
-                <p>载入原片与参考图，AI 会区分场景环境与可迁移调色风格，生成适配原片的完整参数。本地快速匹配仅作为辅助方案。</p>
-                <button className="button button--light" onClick={pickSourceFromStage}><Upload size={16}/> 选择第一张原片</button>
+                <button className="button button--light empty-stage__cta" type="button" onClick={pickSourceFromStage}>
+                  <Upload size={16} /> 选择原片
+                </button>
               </div>
             )}
           </div>
 
           <div className="stage__footer">
-            <span>{sourceData ? `${sourceData.width} × ${sourceData.height} PREVIEW` : 'NO IMAGE'}</span>
+            <span>
+              {matchPreviewData && source
+                ? `${matchPreviewData.width} × ${matchPreviewData.height} PREVIEW · 原片 ${source.width}×${source.height}`
+                : 'NO IMAGE'}
+            </span>
             <span><i className="gpu-dot"/> {previewEngine === 'gpu' ? 'WEBGL2 GPU' : previewEngine === 'error' ? 'GPU ERROR' : 'GPU INITIALIZING'} · {canvasEngineLabel}</span>
             <span>WINDOWS · sRGB / 8 BIT</span>
           </div>

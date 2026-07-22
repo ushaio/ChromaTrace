@@ -90,6 +90,30 @@ export interface Adjustments {
   saturation: number
   fade: number
   grain: number
+  /** Mid/high-frequency structure (-100..100), Lightroom Texture. */
+  texture: number
+  /** Midtone local contrast (-100..100), Lightroom Clarity. */
+  clarity: number
+  /** Atmospheric contrast (-100..100), Lightroom Dehaze. */
+  dehaze: number
+  /** Unsharp amount (0..150), Lightroom SharpenAmount. */
+  sharpen: number
+  /** Blur radius for unsharp (0.5..3). */
+  sharpenRadius: number
+  /** Fine-detail emphasis (0..100). */
+  sharpenDetail: number
+  /** Edge masking to protect flat areas (0..100). */
+  sharpenMasking: number
+  /** Luminance noise reduction (0..100). */
+  luminanceNoiseReduction: number
+  /** Color noise reduction (0..100). */
+  colorNoiseReduction: number
+  /** Radial vignette amount (-100..100). */
+  vignette: number
+  /** Vignette start distance (0..100). */
+  vignetteMidpoint: number
+  /** Vignette soft falloff (0..100). */
+  vignetteFeather: number
   toneMatchStrength: number
   colorMatchStrength: number
   preserveLuma: number
@@ -98,6 +122,11 @@ export interface Adjustments {
   hsl: HslAdjustments
   colorGrading: ColorGradingAdjustments
   calibration: CalibrationAdjustments
+  /**
+   * 3D CUBE LUT mix amount (0–100). The LUT table itself is stored separately
+   * (not serializable as plain adjustments) and applied after grading.
+   */
+  lutAmount: number
 }
 
 export type ModelApiType = 'responses' | 'chat-completions' | 'images-generations'

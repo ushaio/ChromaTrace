@@ -1,3 +1,4 @@
+import { applyCubeLutRgb, type CubeLut3D } from './cubeLut'
 import type {
   Adjustments, ColorStats, CrossImageTransfer, HslChannel, MatchControls, MatchProfile, RGB, ToneZoneStats,
 } from './types'
@@ -628,31 +629,332 @@ function applyColorGrading(rgb: RGB, adjustments: Adjustments): RGB {
   return blendRgb(rgb, target, protectedAmount(rgb, adjustments))
 }
 
+function applyDehaze(rgb: RGB, amount: number): RGB {
+  if (!amount) return rgb
+  const strength = amount / 100
+  const luma = encodedLuma(rgb[0], rgb[1], rgb[2])
+  // Positive dehaze deepens blacks and lifts micro-contrast; negative adds haze.
+  const pivot = 0.42
+  const contrast = 1 + strength * 0.48
+  let r = (rgb[0] - pivot) * contrast + pivot - strength * 0.045
+  let g = (rgb[1] - pivot) * contrast + pivot - strength * 0.045
+  let b = (rgb[2] - pivot) * contrast + pivot - strength * 0.045
+  const satBoost = 1 + strength * 0.28 * (1 - clamp(Math.abs(luma - 0.55) * 1.4))
+  const mid = encodedLuma(r, g, b)
+  r = mid + (r - mid) * satBoost
+  g = mid + (g - mid) * satBoost
+  b = mid + (b - mid) * satBoost
+  return [clamp(r), clamp(g), clamp(b)]
+}
+
 export function transformRgb(rgb: RGB, adjustments: Adjustments, profile?: MatchProfile | null): RGB {
   const matched = profile ? applyCrossImageTransfer(rgb, profile, adjustments) : rgb
   const calibrated = applyCalibration(matched, adjustments)
   const basic = applyBasicAdjustments(calibrated, adjustments)
-  const curved = applyCurves(basic, adjustments)
+  const dehazed = applyDehaze(basic, adjustments.dehaze)
+  const curved = applyCurves(dehazed, adjustments)
   const selective = applyHslAdjustments(curved, adjustments)
   return applyColorGrading(selective, adjustments)
 }
+
+function needsSpatialPass(adjustments: Adjustments) {
+  return Boolean(
+    adjustments.texture
+    || adjustments.clarity
+    || adjustments.sharpen
+    || adjustments.luminanceNoiseReduction
+    || adjustments.colorNoiseReduction
+    || adjustments.vignette,
+  )
+}
+
+function samplePixel(data: Uint8ClampedArray, width: number, height: number, x: number, y: number): RGB {
+  const sx = Math.max(0, Math.min(width - 1, x))
+  const sy = Math.max(0, Math.min(height - 1, y))
+  const index = (sy * width + sx) * 4
+  return [data[index] / 255, data[index + 1] / 255, data[index + 2] / 255]
+}
+
+/** Separable 3-tap / 5-tap style blur for local structure controls. */
+function blurSample(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  radius: number,
+): RGB {
+  const steps = radius <= 1.25 ? 1 : 2
+  let r = 0
+  let g = 0
+  let b = 0
+  let weight = 0
+  for (let oy = -steps; oy <= steps; oy += 1) {
+    for (let ox = -steps; ox <= steps; ox += 1) {
+      const distance = Math.hypot(ox, oy)
+      if (distance > steps + 0.01) continue
+      const sample = samplePixel(data, width, height, x + ox, y + oy)
+      const w = 1 / (1 + distance)
+      r += sample[0] * w
+      g += sample[1] * w
+      b += sample[2] * w
+      weight += w
+    }
+  }
+  return [r / weight, g / weight, b / weight]
+}
+
+function applySpatialPixel(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  adjustments: Adjustments,
+): RGB {
+  const original = samplePixel(data, width, height, x, y)
+  let rgb: RGB = [...original]
+
+  const textureAmount = adjustments.texture / 100
+  const clarityAmount = adjustments.clarity / 100
+  if (textureAmount || clarityAmount) {
+    const fine = blurSample(data, width, height, x, y, 1)
+    const broad = blurSample(data, width, height, x, y, 2.4)
+    const fineDetail: RGB = [original[0] - fine[0], original[1] - fine[1], original[2] - fine[2]]
+    const broadDetail: RGB = [original[0] - broad[0], original[1] - broad[1], original[2] - broad[2]]
+    const luma = encodedLuma(original[0], original[1], original[2])
+    const midMask = 1 - clamp(Math.abs(luma - 0.5) * 2)
+    rgb = [
+      clamp(rgb[0] + fineDetail[0] * textureAmount * 0.85 + broadDetail[0] * clarityAmount * 0.55 * midMask),
+      clamp(rgb[1] + fineDetail[1] * textureAmount * 0.85 + broadDetail[1] * clarityAmount * 0.55 * midMask),
+      clamp(rgb[2] + fineDetail[2] * textureAmount * 0.85 + broadDetail[2] * clarityAmount * 0.55 * midMask),
+    ]
+  }
+
+  if (adjustments.sharpen > 0) {
+    const radius = clamp(adjustments.sharpenRadius, 0.5, 3)
+    const blurred = blurSample(data, width, height, x, y, radius)
+    const detail: RGB = [rgb[0] - blurred[0], rgb[1] - blurred[1], rgb[2] - blurred[2]]
+    const edge = (Math.abs(detail[0]) + Math.abs(detail[1]) + Math.abs(detail[2])) / 3
+    const masking = adjustments.sharpenMasking / 100
+    const mask = masking <= 0.001
+      ? 1
+      : clamp((edge - masking * 0.04) / Math.max(0.02, masking * 0.12 + 0.02))
+    const amount = adjustments.sharpen / 100 * (0.55 + adjustments.sharpenDetail / 100 * 0.75)
+    rgb = [
+      clamp(rgb[0] + detail[0] * amount * mask),
+      clamp(rgb[1] + detail[1] * amount * mask),
+      clamp(rgb[2] + detail[2] * amount * mask),
+    ]
+  }
+
+  const lumaNr = adjustments.luminanceNoiseReduction / 100
+  const colorNr = adjustments.colorNoiseReduction / 100
+  if (lumaNr || colorNr) {
+    const blurred = blurSample(data, width, height, x, y, 1 + Math.max(lumaNr, colorNr))
+    const originalLuma = encodedLuma(rgb[0], rgb[1], rgb[2])
+    const blurredLuma = encodedLuma(blurred[0], blurred[1], blurred[2])
+    const mixedLuma = originalLuma * (1 - lumaNr * 0.85) + blurredLuma * (lumaNr * 0.85)
+    const cr = rgb[0] - originalLuma
+    const cg = rgb[1] - originalLuma
+    const cb = rgb[2] - originalLuma
+    const br = blurred[0] - blurredLuma
+    const bg = blurred[1] - blurredLuma
+    const bb = blurred[2] - blurredLuma
+    const chromaMix = colorNr
+    rgb = [
+      clamp(mixedLuma + cr * (1 - chromaMix) + br * chromaMix),
+      clamp(mixedLuma + cg * (1 - chromaMix) + bg * chromaMix),
+      clamp(mixedLuma + cb * (1 - chromaMix) + bb * chromaMix),
+    ]
+  }
+
+  if (adjustments.vignette) {
+    const nx = width > 1 ? x / (width - 1) : 0.5
+    const ny = height > 1 ? y / (height - 1) : 0.5
+    const dx = (nx - 0.5) * 2
+    const dy = (ny - 0.5) * 2
+    const dist = Math.hypot(dx, dy)
+    const inner = adjustments.vignetteMidpoint / 100 * 0.95
+    const outer = inner + adjustments.vignetteFeather / 100 * 1.15 + 0.08
+    const t = clamp((dist - inner) / Math.max(0.001, outer - inner))
+    const smooth = t * t * (3 - 2 * t)
+    // Lightroom: negative amount darkens corners.
+    const factor = 1 + (adjustments.vignette / 100) * smooth * 0.85
+    rgb = [clamp(rgb[0] * factor), clamp(rgb[1] * factor), clamp(rgb[2] * factor)]
+  }
+
+  return rgb
+}
+
+function createImageDataBuffer(width: number, height: number, data: Uint8ClampedArray): ImageData {
+  if (typeof ImageData === 'function') {
+    try {
+      // Copy into a fresh ArrayBuffer-backed view for DOM ImageData constructors.
+      const pixels = new Uint8ClampedArray(data)
+      return new ImageData(pixels, width, height)
+    } catch {
+      // Node / incomplete polyfills fall through to a structural ImageData.
+    }
+  }
+  return { width, height, data, colorSpace: 'srgb' } as ImageData
+}
+
+/** Yield so React can paint “正在导出” and the UI stays responsive during long CPU work. */
+export function yieldToUi(): Promise<void> {
+  return new Promise((resolve) => {
+    // Double rAF: wait until after the next paint.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve())
+    })
+  })
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    // Prefer idle callback when available; fall back to a short timer.
+    const ric = (globalThis as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback
+    if (typeof ric === 'function') {
+      ric(() => resolve(), { timeout: 24 })
+      return
+    }
+    setTimeout(resolve, 0)
+  })
+}
+
+/**
+ * Full pixel pipeline:
+ * grade (transformRgb) → spatial detail → grain → optional 3D CUBE LUT (sRGB, L2).
+ * LUT is applied last among color ops so Resolve-style creative cubes see graded RGB.
+ */
 export function processImageData(
   source: ImageData,
   adjustments: Adjustments,
   profile?: MatchProfile | null,
+  cubeLut?: CubeLut3D | null,
 ): ImageData {
-  const output = new ImageData(new Uint8ClampedArray(source.data), source.width, source.height)
-  const data = output.data
+  // Sync path for previews / tests — export should prefer processImageDataAsync.
+  return processImageDataSync(source, adjustments, profile, cubeLut)
+}
+
+/**
+ * Same pipeline as processImageData, but yields between row batches so the main thread
+ * can paint and handle input during multi-megapixel exports.
+ */
+export async function processImageDataAsync(
+  source: ImageData,
+  adjustments: Adjustments,
+  profile?: MatchProfile | null,
+  cubeLut?: CubeLut3D | null,
+  options?: { rowsPerSlice?: number },
+): Promise<ImageData> {
+  const rowsPerSlice = Math.max(8, options?.rowsPerSlice ?? 24)
+  return processImageDataAsyncInternal(source, adjustments, profile, cubeLut, rowsPerSlice)
+}
+
+function processImageDataSync(
+  source: ImageData,
+  adjustments: Adjustments,
+  profile: MatchProfile | null | undefined,
+  cubeLut: CubeLut3D | null | undefined,
+): ImageData {
+  const { width, height } = source
+  const gradedData = new Uint8ClampedArray(source.data.length)
+  const applyLut = Boolean(cubeLut && adjustments.lutAmount > 0)
+  const runSpatial = needsSpatialPass(adjustments)
   const grainAmount = adjustments.grain / 100 * 13
-  for (let i = 0; i < data.length; i += 4) {
-    const rgb = transformRgb([data[i] / 255, data[i + 1] / 255, data[i + 2] / 255], adjustments, profile)
-    const pixelIndex = i / 4
-    const noise = grainAmount ? (pseudoRandom(pixelIndex) - 0.5) * grainAmount : 0
-    data[i] = clamp(rgb[0] * 255 + noise, 0, 255)
-    data[i + 1] = clamp(rgb[1] * 255 + noise, 0, 255)
-    data[i + 2] = clamp(rgb[2] * 255 + noise, 0, 255)
+  const needsSecondPass = runSpatial || grainAmount > 0 || applyLut
+  const outputData = needsSecondPass ? new Uint8ClampedArray(gradedData.length) : gradedData
+
+  for (let y = 0; y < height; y += 1) {
+    gradeRow(source, gradedData, width, y, adjustments, profile)
   }
-  return output
+  if (needsSecondPass) {
+    for (let y = 0; y < height; y += 1) {
+      finishRow(gradedData, outputData, width, height, y, adjustments, cubeLut, applyLut, runSpatial, grainAmount)
+    }
+  }
+  return createImageDataBuffer(width, height, outputData)
+}
+
+function gradeRow(
+  source: ImageData,
+  gradedData: Uint8ClampedArray,
+  width: number,
+  y: number,
+  adjustments: Adjustments,
+  profile: MatchProfile | null | undefined,
+) {
+  const rowStart = y * width * 4
+  const rowEnd = rowStart + width * 4
+  for (let i = rowStart; i < rowEnd; i += 4) {
+    const rgb = transformRgb(
+      [source.data[i] / 255, source.data[i + 1] / 255, source.data[i + 2] / 255],
+      adjustments,
+      profile,
+    )
+    gradedData[i] = Math.round(clamp(rgb[0]) * 255)
+    gradedData[i + 1] = Math.round(clamp(rgb[1]) * 255)
+    gradedData[i + 2] = Math.round(clamp(rgb[2]) * 255)
+    gradedData[i + 3] = source.data[i + 3]
+  }
+}
+
+function finishRow(
+  gradedData: Uint8ClampedArray,
+  outputData: Uint8ClampedArray,
+  width: number,
+  height: number,
+  y: number,
+  adjustments: Adjustments,
+  cubeLut: CubeLut3D | null | undefined,
+  applyLut: boolean,
+  runSpatial: boolean,
+  grainAmount: number,
+) {
+  for (let x = 0; x < width; x += 1) {
+    const i = (y * width + x) * 4
+    let rgb = runSpatial
+      ? applySpatialPixel(gradedData, width, height, x, y, adjustments)
+      : [gradedData[i] / 255, gradedData[i + 1] / 255, gradedData[i + 2] / 255] as RGB
+    if (applyLut && cubeLut) {
+      rgb = applyCubeLutRgb(rgb, cubeLut, adjustments.lutAmount)
+    }
+    const noise = grainAmount ? (pseudoRandom(i / 4) - 0.5) * grainAmount : 0
+    outputData[i] = clamp(rgb[0] * 255 + noise, 0, 255)
+    outputData[i + 1] = clamp(rgb[1] * 255 + noise, 0, 255)
+    outputData[i + 2] = clamp(rgb[2] * 255 + noise, 0, 255)
+    outputData[i + 3] = gradedData[i + 3]
+  }
+}
+
+async function processImageDataAsyncInternal(
+  source: ImageData,
+  adjustments: Adjustments,
+  profile: MatchProfile | null | undefined,
+  cubeLut: CubeLut3D | null | undefined,
+  rowsPerSlice: number,
+): Promise<ImageData> {
+  const { width, height } = source
+  const gradedData = new Uint8ClampedArray(source.data.length)
+  const applyLut = Boolean(cubeLut && adjustments.lutAmount > 0)
+  const runSpatial = needsSpatialPass(adjustments)
+  const grainAmount = adjustments.grain / 100 * 13
+  const needsSecondPass = runSpatial || grainAmount > 0 || applyLut
+  const outputData = needsSecondPass ? new Uint8ClampedArray(gradedData.length) : gradedData
+
+  for (let y = 0; y < height; y += 1) {
+    gradeRow(source, gradedData, width, y, adjustments, profile)
+    if ((y + 1) % rowsPerSlice === 0) await yieldToEventLoop()
+  }
+  if (needsSecondPass) {
+    await yieldToEventLoop()
+    for (let y = 0; y < height; y += 1) {
+      finishRow(gradedData, outputData, width, height, y, adjustments, cubeLut, applyLut, runSpatial, grainAmount)
+      if ((y + 1) % rowsPerSlice === 0) await yieldToEventLoop()
+    }
+  }
+  return createImageDataBuffer(width, height, outputData)
 }
 
 function pseudoRandom(seed: number) {

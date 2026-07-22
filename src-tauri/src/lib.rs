@@ -1,5 +1,7 @@
+mod asset_library;
 mod credentials;
 mod model_client;
+mod raw_decode;
 
 use std::fs;
 use std::path::Path;
@@ -42,6 +44,18 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_binary_file,
             write_binary_file,
+            raw_decode::decode_raw_file,
+            asset_library::list_library_assets,
+            asset_library::import_library_asset,
+            asset_library::import_library_folder,
+            asset_library::import_library_asset_bytes,
+            asset_library::read_library_asset_text,
+            asset_library::delete_library_asset,
+            asset_library::rename_library_asset,
+            asset_library::rename_library_folder,
+            asset_library::delete_library_folder,
+            asset_library::move_library_asset,
+            asset_library::move_library_folder,
             credentials::save_api_key,
             credentials::delete_api_key,
             credentials::has_api_key,

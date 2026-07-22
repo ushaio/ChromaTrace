@@ -19,7 +19,19 @@ const xmp = `
       crs:ColorGradeShadowSat="16"
       crs:ColorGradeBlending="62"
       crs:RedPrimaryHue="9"
-      crs:Texture="15">
+      crs:Texture="15"
+      crs:Clarity2012="22"
+      crs:Dehaze="8"
+      crs:SharpenAmount="40"
+      crs:SharpenRadius="1.2"
+      crs:SharpenDetail="30"
+      crs:SharpenEdgeMasking="45"
+      crs:LuminanceSmoothing="12"
+      crs:ColorNoiseReduction="18"
+      crs:PostCropVignetteAmount="-28"
+      crs:PostCropVignetteMidpoint="42"
+      crs:PostCropVignetteFeather="55"
+      crs:CropTop="0.05">
       <crs:ToneCurvePV2012>
         <rdf:Seq>
           <rdf:li>0, 10</rdf:li>
@@ -33,7 +45,7 @@ const xmp = `
 </x:xmpmeta>`
 
 describe('parseLightroomXmp', () => {
-  it('maps Lightroom basic, HSL, curve, grading and calibration values', () => {
+  it('maps Lightroom basic, HSL, curve, grading, calibration and detail values', () => {
     const preset = parseLightroomXmp(xmp, 'soft-teal.xmp')
 
     expect(preset.name).toBe('Soft & Teal')
@@ -48,7 +60,22 @@ describe('parseLightroomXmp', () => {
     expect(preset.adjustments.calibration.redHue).toBe(9)
     expect(preset.adjustments.curves.master).toHaveLength(5)
     expect(preset.adjustments.curves.master[0]).toBeCloseTo(10 / 255)
-    expect(preset.unsupportedFields).toContain('纹理')
+    expect(preset.adjustments.texture).toBe(15)
+    expect(preset.adjustments.clarity).toBe(22)
+    expect(preset.adjustments.dehaze).toBe(8)
+    expect(preset.adjustments.sharpen).toBe(40)
+    expect(preset.adjustments.sharpenRadius).toBeCloseTo(1.2)
+    expect(preset.adjustments.sharpenDetail).toBe(30)
+    expect(preset.adjustments.sharpenMasking).toBe(45)
+    expect(preset.adjustments.luminanceNoiseReduction).toBe(12)
+    expect(preset.adjustments.colorNoiseReduction).toBe(18)
+    expect(preset.adjustments.vignette).toBe(-28)
+    expect(preset.adjustments.vignetteMidpoint).toBe(42)
+    expect(preset.adjustments.vignetteFeather).toBe(55)
+    expect(preset.mappedFields).toContain('纹理')
+    expect(preset.mappedFields).toContain('暗角')
+    expect(preset.unsupportedFields).toContain('裁剪')
+    expect(preset.unsupportedFields).not.toContain('纹理')
   })
 
   it('falls back to split toning and approximates absolute color temperature', () => {
@@ -68,11 +95,11 @@ describe('parseLightroomXmp', () => {
     expect(preset.warnings.join(' ')).toContain('5500K')
   })
 
-  it('rejects unrelated or unsupported-only XMP files', () => {
+  it('rejects unrelated or geometry-only XMP files', () => {
     expect(() => parseLightroomXmp('<root/>')).toThrow('未识别')
     expect(() => parseLightroomXmp(`
       <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="rdf">
-        <rdf:Description xmlns:crs="camera-raw" crs:Texture="20" />
+        <rdf:Description xmlns:crs="camera-raw" crs:CropTop="0.1" crs:PerspectiveVertical="5" />
       </rdf:RDF></x:xmpmeta>
     `)).toThrow('没有可映射')
   })

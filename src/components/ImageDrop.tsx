@@ -33,7 +33,13 @@ export function ImageDrop({ title, eyebrow, image, accent, onFile, onPick, onCle
       onDragLeave={() => setDragging(false)}
       onDrop={drop}
     >
-      <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(event) => accept(event.target.files)} />
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp,.cr2,.cr3,.nef,.nrw,.arw,.srf,.sr2,.raf,.orf,.rw2,.pef,.dng,.raw,.rwl,.3fr,.fff,.iiq,.mrw,.mos,.kdc,.dcr,.erf,.mef,.srw"
+        hidden
+        onChange={(event) => accept(event.target.files)}
+      />
       {image ? (
         <>
           <img src={image.url} alt={title} />

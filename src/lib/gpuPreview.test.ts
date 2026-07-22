@@ -14,6 +14,18 @@ describe('packGpuAdjustments', () => {
     adjustments.colorGrading.shadows = { hue: 210, saturation: 12, luminance: -4 }
     adjustments.calibration.blueHue = 17
     adjustments.calibration.blueSaturation = -22
+    adjustments.texture = 15
+    adjustments.clarity = 22
+    adjustments.dehaze = 8
+    adjustments.sharpen = 40
+    adjustments.sharpenRadius = 1.2
+    adjustments.sharpenDetail = 30
+    adjustments.sharpenMasking = 45
+    adjustments.luminanceNoiseReduction = 12
+    adjustments.colorNoiseReduction = 18
+    adjustments.vignette = -28
+    adjustments.vignetteMidpoint = 42
+    adjustments.vignetteFeather = 55
 
     const packed = packGpuAdjustments(adjustments)
 
@@ -21,6 +33,10 @@ describe('packGpuAdjustments', () => {
     expect([...packed.hsl.slice(0, 6)]).toEqual([3, 4, 5, 6, 7, 8])
     expect([...packed.grade.slice(0, 3)]).toEqual([210, 12, -4])
     expect([...packed.calibration1]).toEqual([17, -22])
+    expect([...packed.detail0]).toEqual([15, 22, 8, 40])
+    expect(packed.detail1[0]).toBeCloseTo(1.2)
+    expect([...packed.detail1.slice(1)]).toEqual([30, 45, 12])
+    expect([...packed.detail2]).toEqual([18, -28, 42, 55])
   })
 
   it('normalizes invalid and descending curves exactly once before upload', () => {

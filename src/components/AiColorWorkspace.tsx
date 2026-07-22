@@ -1,22 +1,31 @@
 ﻿import {
-  ArrowRight, Check, CloudUpload, Eye, FileUp, ImageIcon, LoaderCircle, LockKeyhole,
+  Check, CloudUpload, FileUp, ImageIcon, LoaderCircle, LockKeyhole,
   MonitorCog, RotateCcw, Send, SlidersHorizontal, Sparkles, WandSparkles,
 } from 'lucide-react'
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import {
+  afterLayerStyle, CompareDivider, CompareModeControls, CompareSlider, previewFrameClass,
+  type CompareMode,
+} from './CompareModeControls'
 import { FineTunePanels } from './FineTunePanels'
 import { ImageDrop } from './ImageDrop'
 import { mergeGradeWithFineTune } from '../lib/aiColor'
 import { processImageData } from '../lib/colorEngine'
+import { exportGradedImage } from '../lib/exportImage'
+import { parseCubeLut, validateCubeFile, type CubeLut3D } from '../lib/cubeLut'
 import { createDefaultAdjustments } from '../lib/defaults'
 import { GpuPreviewRenderer } from '../lib/gpuPreview'
 import { parseLightroomXmp, validateXmpFile, type LightroomXmpPreset } from '../lib/lightroomXmp'
+import { AssetLibraryPanel } from './AssetLibraryPanel'
 import {
-  generateColoredImage, isTauri, optimizeColorPrompt, pickLightroomXmpPath, readNativeFile, saveJpegNative, suggestColorWorkflows,
+  generateColoredImage, optimizeColorPrompt, readLibraryAssetText, saveJpegNative, suggestColorWorkflows,
+  type LibraryAsset,
 } from '../lib/desktop'
 import {
   canvasToBlob, drawImageDataToCanvas, imageToDataUrl, imageToImageData,
-  loadImageDataUrl, type LoadedImage,
+  imageToViewportImageData, loadImageDataUrl, type LoadedImage,
 } from '../lib/files'
+import { useElementSize } from '../lib/useElementSize'
 import {
   type Adjustments, type AiColorMethod, type AiGradeParameters,
   type ColorWorkflowSuggestion, type ImageGenerationRequestOptions, type ImageGenerationRuntimeConfig, type VisionRuntimeConfig,
@@ -73,9 +82,13 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
   const [workflows, setWorkflows] = useState<ColorWorkflowSuggestion[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [importedPreset, setImportedPreset] = useState<LightroomXmpPreset | null>(null)
+  const [cubeLut, setCubeLut] = useState<CubeLut3D | null>(null)
+  const [activeXmpPath, setActiveXmpPath] = useState<string | null>(null)
+  const [activeCubePath, setActiveCubePath] = useState<string | null>(null)
   const [intensity, setIntensity] = useState(100)
   const [fineTuneAdjustments, setFineTuneAdjustments] = useState<Adjustments>(createDefaultAdjustments)
   const [compare, setCompare] = useState(50)
+  const [compareMode, setCompareMode] = useState<CompareMode>('wipe')
   const [analysisBusy, setAnalysisBusy] = useState(false)
   const [generationBusy, setGenerationBusy] = useState(false)
   const [previewEngine, setPreviewEngine] = useState<PreviewEngine>('initializing')
@@ -94,8 +107,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
   const previewFrame = useRef<number | null>(null)
   const pendingGpuPreview = useRef<{ adjustments: Adjustments } | null>(null)
   const generatedRef = useRef<LoadedImage | null>(null)
-  const xmpInputRef = useRef<HTMLInputElement>(null)
-
+  const gradePreviewFrameRef = useRef<HTMLDivElement>(null)
   generatedRef.current = generatedImage
   const selected = useMemo(
     () => workflows.find((workflow) => workflow.id === selectedId) || null,
@@ -110,6 +122,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
     parameters: toGradeParameters(importedPreset.adjustments),
   }) : null, [importedPreset])
   const activeRecipe = importedRecipe || selected
+  const isManualLocal = Boolean(sourceData) && !activeRecipe && method === 'local-parameters'
   const effectiveLocalAdjustments = useMemo(
     () => importedPreset
       ? fineTuneAdjustments
@@ -119,9 +132,28 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
     [fineTuneAdjustments, importedPreset, intensity, selected],
   )
 
+  const gradeFrameSize = useElementSize(gradePreviewFrameRef, Boolean(source))
+  const [stableGradeFrame, setStableGradeFrame] = useState(gradeFrameSize)
   useEffect(() => {
-    if (sourceData && originalCanvas.current) drawImageDataToCanvas(originalCanvas.current, sourceData)
-  }, [sourceData])
+    const timer = window.setTimeout(() => setStableGradeFrame(gradeFrameSize), 80)
+    return () => window.clearTimeout(timer)
+  }, [gradeFrameSize.width, gradeFrameSize.height])
+  /** Viewport-matched BEFORE (and local AFTER source). */
+  const gradePreviewData = useMemo(() => {
+    if (!source) return null
+    return imageToViewportImageData(source.element, stableGradeFrame.width, stableGradeFrame.height)
+  }, [source, stableGradeFrame.width, stableGradeFrame.height])
+  /** Viewport-matched AI-generated AFTER when in image-generation mode. */
+  const generatedPreviewData = useMemo(() => {
+    if (!generatedImage) return null
+    return imageToViewportImageData(generatedImage.element, stableGradeFrame.width, stableGradeFrame.height)
+  }, [generatedImage, stableGradeFrame.width, stableGradeFrame.height])
+
+  useEffect(() => {
+    if (gradePreviewData && originalCanvas.current) {
+      drawImageDataToCanvas(originalCanvas.current, gradePreviewData)
+    }
+  }, [gradePreviewData])
 
   useEffect(() => {
     setImageRequestOptions({})
@@ -130,12 +162,13 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
   useEffect(() => {
     setWorkflows([])
     setSelectedId('')
-    setOutputKind('none')
     setRevisedPrompt('')
     setFineTuneAdjustments(importedPreset?.adjustments || createDefaultAdjustments())
     setGeneratedSourceData(null)
     if (generatedRef.current) URL.revokeObjectURL(generatedRef.current.url)
     setGeneratedImage(null)
+    // New photo: local-parameter path starts as manual grading; image models wait for a recipe.
+    setOutputKind(method === 'local-parameters' || importedPreset ? 'local' : 'none')
   }, [source?.url])
 
   useEffect(() => () => {
@@ -143,14 +176,26 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
   }, [])
 
   useEffect(() => {
-    if (importedPreset && sourceData) setOutputKind('local')
-  }, [importedPreset, sourceData])
+    if (!sourceData) return
+    if (importedPreset || method === 'local-parameters') {
+      setOutputKind((current) => (current === 'generated' ? current : 'local'))
+    }
+  }, [importedPreset, method, sourceData])
 
-  const renderSource = outputKind === 'generated' ? generatedSourceData : sourceData
-  const renderAdjustments = outputKind === 'local' ? effectiveLocalAdjustments : fineTuneAdjustments
-  const hasPreviewResult = outputKind !== 'none'
-    && Boolean(renderSource)
-    && (outputKind !== 'local' || Boolean(activeRecipe))
+  const renderSource = outputKind === 'generated' ? generatedPreviewData : gradePreviewData
+  const renderAdjustments = outputKind === 'generated' ? fineTuneAdjustments : effectiveLocalAdjustments
+  // Local parameter path always previews once a photo is loaded, even without a recipe.
+  const hasPreviewResult = Boolean(renderSource) && (
+    outputKind === 'generated'
+    || outputKind === 'local'
+    || (method === 'local-parameters' && Boolean(sourceData))
+  )
+
+  const paintCpuPreview = (sourceImage: ImageData, adjustments: Adjustments) => {
+    const canvas = gpuResultCanvas.current
+    if (!canvas) return
+    drawImageDataToCanvas(canvas, processImageData(sourceImage, adjustments, null, cubeLut))
+  }
 
   useEffect(() => {
     if (!hasPreviewResult || !renderSource || !gpuResultCanvas.current) return
@@ -160,31 +205,38 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
     let initializationFrame: number | null = null
     let disposed = false
     const canvas = gpuResultCanvas.current
+    const sourceImage = renderSource
+    const initialAdjustments = renderAdjustments
+    const initialLut = cubeLut
+
+    const fallbackToCpu = (error: unknown) => {
+      console.error('WebGL2 AI color preview failed; falling back to CPU.', error)
+      renderer?.dispose()
+      renderer = null
+      gpuPreviewRenderer.current = null
+      if (!disposed) {
+        paintCpuPreview(sourceImage, initialAdjustments)
+        setPreviewEngine('error')
+      }
+    }
 
     try {
       renderer = new GpuPreviewRenderer(canvas)
-      renderer.setSource(renderSource)
+      renderer.setSource(sourceImage)
+      renderer.setCubeLut(initialLut)
       initializationFrame = window.requestAnimationFrame(() => {
         initializationFrame = null
         if (disposed || !renderer) return
         try {
-          renderer.render(renderAdjustments, null)
+          renderer.render(initialAdjustments, null)
           gpuPreviewRenderer.current = renderer
           setPreviewEngine('gpu')
         } catch (error) {
-          console.error('WebGL2 AI color preview initialization failed.', error)
-          renderer.dispose()
-          renderer = null
-          gpuPreviewRenderer.current = null
-          setPreviewEngine('error')
+          fallbackToCpu(error)
         }
       })
     } catch (error) {
-      console.error('WebGL2 AI color preview initialization failed.', error)
-      renderer?.dispose()
-      renderer = null
-      gpuPreviewRenderer.current = null
-      setPreviewEngine('error')
+      fallbackToCpu(error)
     }
 
     return () => {
@@ -200,28 +252,41 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
       if (gpuPreviewRenderer.current === activeRenderer) gpuPreviewRenderer.current = null
       pendingGpuPreview.current = null
     }
-  }, [hasPreviewResult, renderSource])
+  }, [hasPreviewResult, renderSource, cubeLut])
 
   useEffect(() => {
     pendingGpuPreview.current = { adjustments: renderAdjustments }
-    if (!hasPreviewResult || !gpuPreviewRenderer.current || previewFrame.current !== null) return
+    if (!hasPreviewResult || previewFrame.current !== null) return
 
     previewFrame.current = window.requestAnimationFrame(() => {
       previewFrame.current = null
-      const renderer = gpuPreviewRenderer.current
       const pending = pendingGpuPreview.current
-      if (!renderer || !pending) return
-      try {
-        renderer.render(pending.adjustments, null)
-      } catch (error) {
-        console.error('WebGL2 AI color preview render failed.', error)
-        renderer.dispose()
-        if (gpuPreviewRenderer.current === renderer) gpuPreviewRenderer.current = null
-        pendingGpuPreview.current = null
-        setPreviewEngine('error')
+      if (!pending || !renderSource) return
+
+      const renderer = gpuPreviewRenderer.current
+      if (renderer && previewEngine === 'gpu') {
+        try {
+          renderer.setCubeLut(cubeLut)
+          renderer.render(pending.adjustments, null)
+          return
+        } catch (error) {
+          console.error('WebGL2 AI color preview render failed; falling back to CPU.', error)
+          renderer.dispose()
+          if (gpuPreviewRenderer.current === renderer) gpuPreviewRenderer.current = null
+          pendingGpuPreview.current = null
+          // Prefer a correct CPU frame (with LUT) over a black WebGL frame.
+          paintCpuPreview(renderSource, pending.adjustments)
+          setPreviewEngine('error')
+          return
+        }
+      }
+
+      // CPU path: GPU unavailable, still recovering, or just failed above.
+      if (previewEngine === 'error' || !gpuPreviewRenderer.current) {
+        paintCpuPreview(renderSource, pending.adjustments)
       }
     })
-  }, [hasPreviewResult, previewEngine, renderAdjustments])
+  }, [hasPreviewResult, previewEngine, renderAdjustments, renderSource, cubeLut])
 
   const validateModelReady = (needsImageModel = false) => {
     if (!source) { notify('请先选择一张照片', 'error'); return false }
@@ -275,45 +340,59 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
     }
   }
 
-  const importXmpPreset = async (file: File) => {
-    try {
-      validateXmpFile(file)
-      const preset = parseLightroomXmp(await file.text(), file.name)
-      setImportedPreset(preset)
-      setSelectedId('')
-      setMethod('local-parameters')
-      setFineTuneAdjustments(preset.adjustments)
-      setOutputKind(sourceData ? 'local' : 'none')
-      setGeneratedSourceData(null)
-      setRevisedPrompt('')
-      setRightPanel('recipe')
-      const suffix = preset.unsupportedFields.length
-        ? `；${preset.unsupportedFields.length} 类参数暂未应用`
-        : ''
-      notify(`已导入“${preset.name}”，映射 ${preset.mappedFields.length} 类参数${suffix}`)
-    } catch (error) {
-      notify(errorMessage(error, 'XMP 预设导入失败'), 'error')
-    } finally {
-      if (xmpInputRef.current) xmpInputRef.current.value = ''
-    }
+  const applyXmpText = async (text: string, fileName: string, libraryRelativePath?: string) => {
+    validateXmpFile({ name: fileName, size: new TextEncoder().encode(text).length })
+    const preset = parseLightroomXmp(text, fileName)
+    setImportedPreset(preset)
+    setActiveXmpPath(libraryRelativePath || fileName)
+    setSelectedId('')
+    setMethod('local-parameters')
+    setFineTuneAdjustments(preset.adjustments)
+    setOutputKind(sourceData ? 'local' : 'none')
+    setGeneratedSourceData(null)
+    setRevisedPrompt('')
+    setRightPanel('recipe')
+    const suffix = preset.unsupportedFields.length
+      ? `；${preset.unsupportedFields.length} 类参数暂未应用`
+      : ''
+    notify(`已应用“${preset.name}”，映射 ${preset.mappedFields.length} 类参数${suffix}`)
   }
 
-  const pickXmpPreset = async () => {
-    if (!isTauri()) {
-      xmpInputRef.current?.click()
-      return
-    }
+  const applyCubeText = async (text: string, fileName: string, libraryRelativePath?: string) => {
+    validateCubeFile({ name: fileName, size: new TextEncoder().encode(text).length })
+    const lut = parseCubeLut(text, fileName)
+    setCubeLut(lut)
+    setActiveCubePath(libraryRelativePath || fileName)
+    setFineTuneAdjustments((current) => ({
+      ...current,
+      lutAmount: current.lutAmount > 0 ? current.lutAmount : 100,
+    }))
+    if (sourceData && method === 'local-parameters') setOutputKind('local')
+    notify(`已应用 CUBE「${lut.title}」· ${lut.size}³ · sRGB 三线性（L2）`)
+  }
 
-    try {
-      const path = await pickLightroomXmpPath()
-      if (!path) return
-      const bytes = await readNativeFile(path)
-      const fileName = path.split(/[\\/]/).pop() || 'lightroom-preset.xmp'
-      const file = new File([bytes.slice().buffer], fileName, { type: 'application/rdf+xml' })
-      await importXmpPreset(file)
-    } catch (error) {
-      notify(errorMessage(error, '无法打开 XMP 预设'), 'error')
-    }
+  const applyLibraryXmp = async (asset: LibraryAsset) => {
+    const text = await readLibraryAssetText('xmp', asset.relativePath)
+    await applyXmpText(text, asset.fileName, asset.relativePath)
+  }
+
+  const applyLibraryCube = async (asset: LibraryAsset) => {
+    const text = await readLibraryAssetText('cube', asset.relativePath)
+    await applyCubeText(text, asset.fileName, asset.relativePath)
+  }
+
+  const clearCubeLut = () => {
+    setCubeLut(null)
+    setActiveCubePath(null)
+    notify('已移除 CUBE LUT')
+  }
+
+  const clearXmpPreset = () => {
+    setImportedPreset(null)
+    setActiveXmpPath(null)
+    setFineTuneAdjustments(createDefaultAdjustments())
+    if (sourceData && method === 'local-parameters') setOutputKind('local')
+    notify('已清除 XMP 预设')
   }
 
   const analyze = async () => {
@@ -331,10 +410,14 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
       setWorkflows(next)
       setSelectedId('')
       setImportedPreset(null)
-      setOutputKind('none')
-      setFineTuneAdjustments(createDefaultAdjustments())
+      setActiveXmpPath(null)
+      // Keep current manual params until the user picks a recipe (that action overwrites them).
       setGeneratedSourceData(null)
-      notify('已生成 3 个针对当前照片的调色方案')
+      if (generatedRef.current) URL.revokeObjectURL(generatedRef.current.url)
+      setGeneratedImage(null)
+      setOutputKind(method === 'local-parameters' ? 'local' : 'none')
+      setRightPanel('recipe')
+      notify('已生成 3 个调色方案；选择任一配方会覆盖当前手动参数')
     } catch (error) {
       notify(errorMessage(error, 'AI 调色分析失败'), 'error')
     } finally {
@@ -343,11 +426,15 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
   }
   const chooseMethod = (next: AiColorMethod) => {
     setImportedPreset(null)
+    setActiveXmpPath(null)
     setMethod(next)
     setCompare(50)
     setRevisedPrompt('')
-    setFineTuneAdjustments(createDefaultAdjustments())
-    if (next === 'local-parameters' && selected && sourceData) {
+    setFineTuneAdjustments((current) => ({
+      ...createDefaultAdjustments(),
+      lutAmount: current.lutAmount,
+    }))
+    if (next === 'local-parameters' && sourceData) {
       setOutputKind('local')
       return
     }
@@ -356,11 +443,14 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
 
   const chooseWorkflow = (workflow: ColorWorkflowSuggestion) => {
     setImportedPreset(null)
+    setActiveXmpPath(null)
     setSelectedId(workflow.id)
+    // Selecting an AI recipe overwrites the current manual baseline (fine-tune starts from zero deltas).
     setFineTuneAdjustments(createDefaultAdjustments())
     setRevisedPrompt('')
     if (method === 'local-parameters' && sourceData) {
       setOutputKind('local')
+      notify(`已应用「${workflow.title}」，手动参数已按该配方覆盖`)
       return
     }
     setOutputKind('none')
@@ -396,24 +486,34 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
   }
 
   const exportResult = async () => {
-    if (!source || outputKind === 'none' || !activeRecipe) return notify('请先应用或生成调色结果', 'error')
+    if (!source || !sourceData) return notify('请先选择一张照片', 'error')
+    if (outputKind === 'generated' && !generatedImage) return notify('请先生成调色结果', 'error')
+    if (outputKind !== 'generated' && method === 'image-generation' && !activeRecipe) {
+      return notify('图生图模式请先选择配方并生成结果，或切换到参数调色进行手动调整', 'error')
+    }
     setExporting(true)
     try {
-      const canvas = document.createElement('canvas')
-      if (outputKind === 'generated' && generatedImage) {
-        const maxSide = Math.max(generatedImage.element.naturalWidth, generatedImage.element.naturalHeight)
-        const exportData = imageToImageData(generatedImage.element, maxSide)
-        drawImageDataToCanvas(canvas, processImageData(exportData, fineTuneAdjustments, null))
-      } else {
-        const exportData = imageToImageData(source.element, 3000)
-        drawImageDataToCanvas(canvas, processImageData(exportData, effectiveLocalAdjustments, null))
-      }
-      const blob = await canvasToBlob(canvas, .94)
-      const bytes = new Uint8Array(await blob.arrayBuffer())
-      const suffix = outputKind === 'generated' ? 'ai-image-color' : importedPreset ? 'lightroom-xmp' : 'ai-local-color'
+      const exportSource = outputKind === 'generated' && generatedImage
+        ? generatedImage.element
+        : source.element
+      const exportAdjustments = outputKind === 'generated' ? fineTuneAdjustments : effectiveLocalAdjustments
+      // Full native resolution; GPU first (Lightroom-like), CPU fallback. No 3000px cap.
+      const result = await exportGradedImage(exportSource, exportAdjustments, {
+        cubeLut,
+        quality: 0.92,
+      })
+      const suffix = outputKind === 'generated'
+        ? 'ai-image-color'
+        : importedPreset
+          ? 'lightroom-xmp'
+          : activeRecipe
+            ? 'ai-local-color'
+            : 'manual-color'
       const defaultName = `${source.name.replace(/\.[^.]+$/, '')}-${suffix}.jpg`
-      const saved = await saveJpegNative(bytes, defaultName, '导出 AI 调色效果图')
-      if (saved) notify('AI 调色 JPEG 已导出')
+      const saved = await saveJpegNative(result.bytes, defaultName, '导出 AI 调色效果图')
+      if (saved) {
+        notify(`调色结果已导出 · ${result.width}×${result.height} · ${result.engine.toUpperCase()}`)
+      }
     } catch (error) {
       notify(errorMessage(error, '导出 AI 调色结果失败'), 'error')
     } finally {
@@ -426,11 +526,13 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
   }))
 
   useEffect(() => {
-    onExportStateChange({
-      canExport: Boolean(source && activeRecipe && outputKind !== 'none'),
-      exporting,
-    })
-  }, [activeRecipe, exporting, onExportStateChange, outputKind, source])
+    const canExport = Boolean(source && sourceData) && (
+      outputKind === 'generated'
+      || outputKind === 'local'
+      || method === 'local-parameters'
+    )
+    onExportStateChange({ canExport, exporting })
+  }, [exporting, method, onExportStateChange, outputKind, source, sourceData])
 
   const analysisButtonLabel = stylePrompt.trim()
     ? '根据风格提示生成配方'
@@ -438,134 +540,248 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
 
   return (
     <main className="workspace-layout ai-grade-workspace">
-      <aside className="workspace-rail workspace-rail--left grade-steps">
-        <div className="rail-heading">
-          <div><span className="kicker">AI COLOR / WORKFLOW</span><h2>AI 调色</h2></div>
-          <span className={`status-dot ${source ? 'is-ready' : ''}`}>{source ? 'READY' : 'STEP 1'}</span>
-        </div>
-
-        <section className="grade-step">
-          <div className="grade-step__head"><span>01</span><div><strong>选择照片</strong><small>JPG · PNG · WebP</small></div></div>
-          <ImageDrop
-            title="载入需要调色的照片" eyebrow="SOURCE / 原片" image={source} accent="source"
-            onFile={onFile} onPick={onPick} onClear={onClear}
-          />
-        </section>
-
-        <section className="grade-step">
-          <div className="grade-step__head"><span>02</span><div><strong>选择调色方式</strong><small>同一份 AI 配方，两种执行路径</small></div></div>
-          <div className="method-stack">
-            <button className={`method-card ${method === 'local-parameters' ? 'is-active' : ''}`} onClick={() => chooseMethod('local-parameters')}>
-              <span className="method-card__icon"><SlidersHorizontal size={18}/></span>
-              <span><strong>AI 参数调色</strong><small>视觉模型给出配方，本地 Canvas 执行</small></span>
-              {method === 'local-parameters' ? <Check size={15}/> : <ArrowRight size={15}/>}
-            </button>
-            <button className={`method-card method-card--image ${method === 'image-generation' ? 'is-active' : ''}`} onClick={() => chooseMethod('image-generation')}>
-              <span className="method-card__icon"><WandSparkles size={18}/></span>
-              <span><strong>AI 图生图调色</strong><small>选择配方后交给图像编辑或生成模型</small></span>
-              {method === 'image-generation' ? <Check size={15}/> : <ArrowRight size={15}/>}
-            </button>
-            <input
-              ref={xmpInputRef}
-              type="file"
-              accept=".xmp,application/rdf+xml,application/xml,text/xml"
-              hidden
-              onChange={(event) => { const file = event.target.files?.[0]; if (file) void importXmpPreset(file) }}
-            />
-            <button className={`method-card method-card--xmp ${importedPreset ? 'is-active' : ''}`} onClick={() => void pickXmpPreset()}>
-              <span className="method-card__icon"><FileUp size={18}/></span>
-              <span>
-                <strong>导入 Lightroom XMP <em className="beta-badge">BETA</em></strong>
-                <small>{importedPreset ? `已载入：${importedPreset.name}` : '本地解析预设，转换为可继续编辑的参数'}</small>
-              </span>
-              {importedPreset ? <Check size={15}/> : <ArrowRight size={15}/>}
-            </button>
+      <aside className="workspace-rail workspace-rail--left grade-steps left-console">
+        <header className="left-console__head">
+          <div className="rail-heading">
+            <div><span className="kicker">GRADE / WORKFLOW</span><h2>AI 调色</h2></div>
+            <span className={`status-dot ${source ? 'is-ready' : ''}`}>{source ? 'READY' : 'STEP 1'}</span>
           </div>
-        </section>
+          <ol className="rail-progress" aria-label="调色准备进度">
+            <li className={source ? 'is-done' : 'is-current'}><i>1</i><span>照片</span></li>
+            <li className={importedPreset || method ? (source ? 'is-done' : 'is-current') : ''}><i>2</i><span>方式</span></li>
+            <li className={activeRecipe ? 'is-done' : source ? 'is-current' : ''}><i>3</i><span>配方</span></li>
+          </ol>
+        </header>
 
-        <section className="grade-step grade-guidance">
-          <div className="grade-step__head"><span>03</span><div><strong>描述目标风格</strong><small>可选，不填写则由 AI 自动判断</small></div></div>
-          <div className="style-prompt-field">
-            <div className="style-prompt-field__head">
-              <label htmlFor="ai-color-style-prompt">调色提示语</label>
-              <small>{stylePrompt.length}/800</small>
+        <div className="left-console__body">
+          <section className="rail-card">
+            <div className="rail-card__head">
+              <span className="rail-card__index">01</span>
+              <div><strong>选择照片</strong><small>JPG · PNG · WebP</small></div>
             </div>
-            <div className="style-prompt-input">
-              <textarea
-                id="ai-color-style-prompt"
-                value={stylePrompt}
-                maxLength={800}
-                onChange={(event) => setStylePrompt(event.target.value)}
-                placeholder="例如：清透日系，降低高光暖色，阴影微微偏青，保留自然肤色与柔和反差"
-              />
+            <ImageDrop
+              title="载入需要调色的照片" eyebrow="SOURCE / 原片" image={source} accent="source"
+              onFile={onFile} onPick={onPick} onClear={onClear}
+            />
+          </section>
+
+          <section className="rail-card">
+            <div className="rail-card__head">
+              <span className="rail-card__index">02</span>
+              <div><strong>执行方式</strong><small>同一配方，不同落地路径</small></div>
+            </div>
+            <div className="method-toggle" role="radiogroup" aria-label="AI 调色执行方式">
               <button
                 type="button"
-                className="prompt-optimize-button"
-                disabled={!source || !stylePrompt.trim() || promptBusy || analysisBusy}
-                title="优化提示词"
-                aria-label="优化提示词"
-                onClick={optimizeStylePrompt}
+                role="radio"
+                aria-checked={method === 'local-parameters' && !importedPreset}
+                className={method === 'local-parameters' && !importedPreset ? 'is-active' : ''}
+                onClick={() => chooseMethod('local-parameters')}
               >
-                {promptBusy ? <LoaderCircle className="spin" size={14}/> : <WandSparkles size={14}/>}
+                <SlidersHorizontal size={15}/>
+                <span><strong>参数调色</strong><small>本地渲染</small></span>
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={method === 'image-generation' && !importedPreset}
+                className={`method-toggle__image ${method === 'image-generation' && !importedPreset ? 'is-active' : ''}`}
+                onClick={() => chooseMethod('image-generation')}
+              >
+                <WandSparkles size={15}/>
+                <span><strong>图生图</strong><small>云端生成</small></span>
               </button>
             </div>
-            <small className="style-prompt-hint">AI 会补全为可执行的摄影调色语言</small>
+          </section>
+
+          <div className="asset-stack">
+            <AssetLibraryPanel
+              kind="xmp"
+              title="XMP 预设库"
+              className="asset-library--rail-fixed"
+              emptyHint="点击 + 导入预设"
+              activeRelativePath={activeXmpPath}
+              onNotify={notify}
+              onApply={applyLibraryXmp}
+              onAssetPathChange={(from, to) => {
+                if (!activeXmpPath) return
+                if (!to && (activeXmpPath === from || activeXmpPath.startsWith(`${from}/`))) {
+                  setActiveXmpPath(null)
+                  return
+                }
+                if (activeXmpPath === from) setActiveXmpPath(to)
+                else if (from && activeXmpPath.startsWith(`${from}/`)) {
+                  setActiveXmpPath(`${to}${activeXmpPath.slice(from.length)}`)
+                }
+              }}
+            />
+            {importedPreset ? (
+              <div className="asset-active-bar">
+                <span><strong>XMP</strong><small>{importedPreset.name}</small></span>
+                <button type="button" className="asset-active-bar__clear" onClick={clearXmpPreset}>清除</button>
+              </div>
+            ) : null}
+
+            <AssetLibraryPanel
+              kind="cube"
+              title="CUBE LUT 库"
+              className="asset-library--rail-fixed"
+              emptyHint="点击 + 导入 LUT"
+              activeRelativePath={activeCubePath}
+              onNotify={notify}
+              onApply={applyLibraryCube}
+              onAssetPathChange={(from, to) => {
+                if (!activeCubePath) return
+                if (!to && (activeCubePath === from || activeCubePath.startsWith(`${from}/`))) {
+                  setActiveCubePath(null)
+                  return
+                }
+                if (activeCubePath === from) setActiveCubePath(to)
+                else if (from && activeCubePath.startsWith(`${from}/`)) {
+                  setActiveCubePath(`${to}${activeCubePath.slice(from.length)}`)
+                }
+              }}
+            />
+            {cubeLut ? (
+              <div className="cube-lut-controls">
+                <div className="asset-active-bar asset-active-bar--cube">
+                  <span><strong>LUT</strong><small>{cubeLut.title} · {cubeLut.size}³</small></span>
+                  <button type="button" className="asset-active-bar__clear" onClick={clearCubeLut}>移除</button>
+                </div>
+                <label className="intensity-control">
+                  <span>强度 <b>{fineTuneAdjustments.lutAmount}%</b></span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={fineTuneAdjustments.lutAmount}
+                    onChange={(event) => {
+                      const lutAmount = Number(event.target.value)
+                      setFineTuneAdjustments((current) => ({ ...current, lutAmount }))
+                      if (sourceData && method === 'local-parameters') setOutputKind('local')
+                    }}
+                  />
+                </label>
+              </div>
+            ) : null}
           </div>
-        </section>
 
-        <section className="grade-privacy-note">
-          {method === 'local-parameters' ? <MonitorCog size={16}/> : <CloudUpload size={16}/>} 
-          <div><strong>{method === 'local-parameters' ? '本地完成最终渲染' : '会上传重编码图片'}</strong><span>{method === 'local-parameters' ? '模型只看缩略图并输出参数。' : '请检查生成图中的人物、文字与细节。'}</span></div>
-        </section>
 
-        <button className="button button--accent button--full" disabled={!source || analysisBusy} onClick={analyze}>
-          {analysisBusy ? <LoaderCircle className="spin" size={16}/> : <Sparkles size={16}/>} {analysisButtonLabel}
-        </button>
-        {!enabled || !visionApiKeyPresent ? (
-          <button className="grade-settings-link" onClick={onOpenSettings}><LockKeyhole size={13}/> 模型尚未就绪，前往设置</button>
-        ) : null}
+
+        </div>
+
+        <footer className="left-console__foot">
+          <section className={`grade-privacy-note ${method === 'image-generation' && !importedPreset ? 'is-cloud' : ''}`}>
+            {method === 'local-parameters' || importedPreset ? <MonitorCog size={15}/> : <CloudUpload size={15}/>}
+            <div>
+              <strong>
+                {importedPreset
+                  ? 'XMP 本地渲染'
+                  : method === 'local-parameters'
+                    ? '本地完成最终渲染'
+                    : '会上传重编码图片'}
+              </strong>
+              <span>
+                {importedPreset
+                  ? '预设只在本机解析，不会上传 XMP。'
+                  : method === 'local-parameters'
+                    ? '模型只看缩略图并输出参数。'
+                    : '请检查生成图中的人物、文字与细节。'}
+              </span>
+            </div>
+          </section>
+          {!enabled || !visionApiKeyPresent ? (
+            <button className="grade-settings-link" onClick={onOpenSettings}><LockKeyhole size={13}/> 模型尚未就绪，前往设置</button>
+          ) : null}
+        </footer>
       </aside>
 
       <section className="workspace-stage stage grade-stage">
         <div className="stage__toolbar">
           <div className="stage__title"><span className="kicker">PREVIEW / 04</span><strong>{source?.name || '等待选择照片'}</strong></div>
-          <div className="view-switch">
-            <span>对比</span><input aria-label="AI 调色前后对比" type="range" min="0" max="100" value={compare} onChange={(event) => setCompare(Number(event.target.value))}/><output>{compare}%</output>
-          </div>
+          {compareMode === 'toggle' ? (
+            <CompareSlider
+              value={compare}
+              onChange={setCompare}
+              label="前后"
+              disabled={!hasPreviewResult}
+            />
+          ) : (
+            <div className="view-switch view-switch--hint"><span>{compareMode === 'wipe' ? '拖动预览分割线' : compareMode === 'side' ? '左右分屏' : '上下分屏'}</span></div>
+          )}
           <div className="stage__tools">
-            <button className="icon-button" title="清除当前结果" onClick={() => { setOutputKind('none') }}><RotateCcw size={16}/></button>
+            <CompareModeControls mode={compareMode} onChange={setCompareMode} disabled={!sourceData} />
+            <button
+              className="icon-button"
+              title="重置当前预览"
+              onClick={() => {
+                setFineTuneAdjustments(importedPreset?.adjustments || createDefaultAdjustments())
+                setSelectedId('')
+                setImportedPreset(null)
+                setOutputKind(method === 'local-parameters' && sourceData ? 'local' : 'none')
+                setRevisedPrompt('')
+              }}
+            >
+              <RotateCcw size={16}/>
+            </button>
           </div>
         </div>
 
-        <div className={`preview-frame ${sourceData ? 'has-image' : ''}`}>
+        <div
+          ref={gradePreviewFrameRef}
+          className={previewFrameClass(compareMode, Boolean(sourceData), hasPreviewResult)}
+        >
           {sourceData ? (
             <>
-              <canvas ref={originalCanvas} className="preview-canvas preview-canvas--before" />
+              <div className="preview-layer preview-layer--before">
+                <canvas ref={originalCanvas} className="preview-canvas preview-canvas--before" />
+              </div>
               {hasPreviewResult ? (
-                <div className="preview-after" style={{ clipPath: `inset(0 0 0 ${compare}%)` }}>
+                <div className="preview-layer preview-layer--after preview-after" style={afterLayerStyle(compareMode, compare, true)}>
                   <canvas ref={gpuResultCanvas} className="preview-canvas" />
                 </div>
               ) : null}
-              {hasPreviewResult ? <div className="compare-line" style={{ left: `${compare}%` }}><span><Eye size={13}/></span></div> : null}
-              <span className="preview-label preview-label--before">BEFORE</span>
-              <span className="preview-label preview-label--after">{outputKind === 'none' ? 'SELECT RECIPE' : outputKind === 'local' ? 'LOCAL' : 'AI IMAGE'}</span>
+              {hasPreviewResult && compareMode !== 'toggle' ? (
+                <CompareDivider
+                  mode={compareMode}
+                  value={compare}
+                  onChange={setCompare}
+                  frameRef={gradePreviewFrameRef}
+                />
+              ) : null}
+              {!(compareMode === 'toggle' && compare >= 50) ? (
+                <span className="preview-label preview-label--before">BEFORE</span>
+              ) : null}
+              {hasPreviewResult && !(compareMode === 'toggle' && compare < 50) ? (
+                <span className="preview-label preview-label--after">
+                  {outputKind === 'generated'
+                    ? 'AI IMAGE'
+                    : activeRecipe
+                      ? (importedPreset ? 'XMP' : 'AI LOCAL')
+                      : 'MANUAL'}
+                </span>
+              ) : null}
               {generationBusy ? <span className="rendering-pill"><LoaderCircle className="spin" size={14}/> 图像模型生成中</span> : null}
             </>
           ) : (
             <div className="empty-stage">
-              <div className="empty-stage__reticle"><span/><ImageIcon size={38} strokeWidth={1}/><span/></div>
-              <span className="kicker">STEP 01 · SELECT A PHOTOGRAPH</span>
-              <h1>先理解画面，<br/>再决定颜色。</h1>
-              <p>选择一张照片，视觉模型会给出三套可选调色配方。你可以让本地引擎执行参数，也可以交给图像模型完成调色。</p>
-              {onPick ? <button className="button button--light" onClick={onPick}><ImageIcon size={16}/> 选择照片</button> : null}
+              {onPick ? (
+                <button className="button button--light empty-stage__cta" type="button" onClick={onPick}>
+                  <ImageIcon size={16} /> 选择照片
+                </button>
+              ) : null}
             </div>
           )}
         </div>
 
         <div className="stage__footer">
-          <span>{sourceData ? `${sourceData.width} × ${sourceData.height} PREVIEW` : 'NO IMAGE'}</span>
+          <span>
+            {gradePreviewData && source
+              ? `${(renderSource || gradePreviewData).width} × ${(renderSource || gradePreviewData).height} PREVIEW · 原片 ${source.width}×${source.height}`
+              : 'NO IMAGE'}
+          </span>
           <span><i className="gpu-dot"/> {outputKind === 'generated' ? imageConfig?.model || 'IMAGE MODEL' : previewEngine === 'gpu' ? 'WEBGL2 GPU COLOR ENGINE' : previewEngine === 'error' ? 'GPU PREVIEW ERROR' : 'GPU INITIALIZING'}</span>
-          <span>{activeRecipe?.title || 'NO RECIPE SELECTED'}</span>
+          <span>{activeRecipe?.title || (sourceData && method === 'local-parameters' ? '手动调色' : 'NO RECIPE SELECTED')}</span>
         </div>
       </section>
 
@@ -595,17 +811,55 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
           {rightPanel === 'recipe' ? (
             <div className="panel-content grade-recipe-panel">
               <div className="preset-strip recipe-panel-summary">
-                <div><span>调色配方</span><strong>{selected?.title || '选择调色配方'}</strong></div>
-                <span className={`recipe-count ${activeRecipe ? 'is-ready' : ''}`}>{importedPreset ? 'XMP' : `${workflows.length}/3`}</span>
+                <div>
+                  <span>调色配方</span>
+                  <strong>{selected?.title || importedPreset?.name || (source ? '可直接手动调色' : '选择照片')}</strong>
+                </div>
+                <span className={`recipe-count ${activeRecipe || isManualLocal ? 'is-ready' : ''}`}>
+                  {importedPreset ? 'XMP' : workflows.length ? `${workflows.length}/3` : source ? '手动' : '0/3'}
+                </span>
               </div>
 
               <div className="recipe-status" aria-label="调色工作流状态">
                 <span className={source ? 'is-complete' : 'is-current'}><i>01</i>照片</span>
                 <b/>
-                <span className={workflows.length ? 'is-complete' : source ? 'is-current' : ''}><i>02</i>配方</span>
+                <span className={activeRecipe ? 'is-complete' : source ? 'is-current' : ''}><i>02</i>配方</span>
                 <b/>
-                <span className={selected ? 'is-current' : ''}><i>03</i>执行</span>
+                <span className={hasPreviewResult ? 'is-current' : ''}><i>03</i>预览</span>
               </div>
+
+              <section className="rail-card recipe-prompt-card">
+                <div className="rail-card__head">
+                  <span className="rail-card__index"><WandSparkles size={13}/></span>
+                  <div><strong>风格提示</strong><small>可选 · 不填则自动判断</small></div>
+                  <em className="rail-card__meta">{stylePrompt.length}/800</em>
+                </div>
+                <div className="style-prompt-field">
+                  <div className="style-prompt-input">
+                    <textarea
+                      id="ai-color-style-prompt"
+                      value={stylePrompt}
+                      maxLength={800}
+                      onChange={(event) => setStylePrompt(event.target.value)}
+                      placeholder="例如：清透日系，高光偏冷，阴影微青，保留自然肤色"
+                      aria-label="调色提示语"
+                    />
+                    <button
+                      type="button"
+                      className="prompt-optimize-button"
+                      disabled={!source || !stylePrompt.trim() || promptBusy || analysisBusy}
+                      title="优化提示词"
+                      aria-label="优化提示词"
+                      onClick={optimizeStylePrompt}
+                    >
+                      {promptBusy ? <LoaderCircle className="spin" size={14}/> : <WandSparkles size={14}/>}
+                    </button>
+                  </div>
+                </div>
+                <button className="button button--accent button--full recipe-prompt-card__action" disabled={!source || analysisBusy} onClick={analyze}>
+                  {analysisBusy ? <LoaderCircle className="spin" size={16}/> : <Sparkles size={16}/>} {analysisButtonLabel}
+                </button>
+              </section>
 
               {importedPreset ? (
                 <div className="recipe-list">
@@ -628,22 +882,37 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
               ) : (
                 <section className="recipe-waiting">
                   <div className="recipe-waiting__intro">
-                    <span className="recipe-waiting__icon"><Sparkles size={18}/></span>
-                    <div><strong>{source ? '照片已就绪，等待生成配方' : '先选择一张需要调色的照片'}</strong><span>视觉模型会从画面内容、光线和色彩关系出发，给出三种可直接执行的方向。</span></div>
+                    <span className="recipe-waiting__icon"><SlidersHorizontal size={18}/></span>
+                    <div>
+                      <strong>{source ? '可不选配方，直接手动调色' : '先选择一张需要调色的照片'}</strong>
+                      <span>
+                        {source
+                          ? method === 'local-parameters'
+                            ? '右侧「精细调整」可立即改参数；之后生成并选择 AI 配方会覆盖当前手动参数。'
+                            : '图生图模式需先生成 AI 配方；也可切到「参数调色」直接手动调色。'
+                          : '载入照片后即可手动调色，或让视觉模型给出三套配方。'}
+                      </span>
+                    </div>
                   </div>
-                  <div className="recipe-placeholders" aria-hidden="true">
-                    {[
-                      ['01', '自然校正', '平衡曝光、白平衡与肤色'],
-                      ['02', '电影氛围', '重塑冷暖关系与明暗层次'],
-                      ['03', '风格表达', '强化画面的色彩识别度'],
-                    ].map(([index, title, description]) => (
-                      <div className="recipe-card recipe-card--placeholder" key={index}>
-                        <span className="recipe-card__index">{index}</span>
-                        <span className="recipe-card__body"><strong>{title}</strong><small>{description}</small></span>
-                        <span className="recipe-card__check"/>
-                      </div>
-                    ))}
-                  </div>
+                  {source && method === 'local-parameters' ? (
+                    <button className="button button--dark button--full" type="button" onClick={() => setRightPanel('adjust')}>
+                      <SlidersHorizontal size={15}/> 打开精细调整
+                    </button>
+                  ) : (
+                    <div className="recipe-placeholders" aria-hidden="true">
+                      {[
+                        ['01', '自然校正', '平衡曝光、白平衡与肤色'],
+                        ['02', '电影氛围', '重塑冷暖关系与明暗层次'],
+                        ['03', '风格表达', '强化画面的色彩识别度'],
+                      ].map(([index, title, description]) => (
+                        <div className="recipe-card recipe-card--placeholder" key={index}>
+                          <span className="recipe-card__index">{index}</span>
+                          <span className="recipe-card__body"><strong>{title}</strong><small>{description}</small></span>
+                          <span className="recipe-card__check"/>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </section>
               )}
 
@@ -670,7 +939,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
                   {method === 'local-parameters' ? (
                     <div className="recipe-action">
                       {importedPreset ? (
-                        <button className="xmp-reimport" type="button" onClick={() => void pickXmpPreset()}><FileUp size={14}/> 更换 XMP 预设</button>
+                        <p className="xmp-library-hint"><FileUp size={12}/> 可在左侧 XMP 预设库中切换或清除当前预设。</p>
                       ) : (
                         <label className="intensity-control"><span>配方强度 <b>{intensity}%</b></span><input type="range" min="0" max="100" value={intensity} onChange={(event) => setIntensity(Number(event.target.value))}/></label>
                       )}
@@ -739,8 +1008,17 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
           ) : (
             <div className="panel-content">
               <div className="preset-strip">
-                <div><span>当前基线</span><strong>{activeRecipe?.title || '等待应用调色配方'}</strong></div>
-                <button type="button" title="重置精细调整" onClick={() => setFineTuneAdjustments(importedPreset?.adjustments || createDefaultAdjustments())}><RotateCcw size={14}/></button>
+                <div>
+                  <span>当前基线</span>
+                  <strong>{activeRecipe?.title || (source ? '手动调色' : '等待载入照片')}</strong>
+                </div>
+                <button
+                  type="button"
+                  title="重置精细调整"
+                  onClick={() => setFineTuneAdjustments(importedPreset?.adjustments || createDefaultAdjustments())}
+                >
+                  <RotateCcw size={14}/>
+                </button>
               </div>
               <div className="fine-tune-intro">
                 <p>
@@ -748,17 +1026,41 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
                     ? '在 AI 生成图之上追加本地精修；所有参数为 0 时不改变生成结果。'
                     : importedPreset
                       ? 'Lightroom XMP 参数已转换到本地控制；这里显示的是当前实际值，可继续微调。'
-                      : '以 AI 配方为基线继续微调；基础参数为增量值，0 表示保留当前配方效果。'}
+                      : activeRecipe
+                        ? '以 AI 配方为基线继续微调；基础参数为增量值，0 表示保留当前配方效果。再次选择 AI 配方会覆盖当前参数。'
+                        : '未选择配方时，此处参数即为最终本地调色结果。生成并选择 AI 配方后会覆盖这些手动参数。'}
                 </p>
               </div>
-              <FineTunePanels adjustments={fineTuneAdjustments} setAdjustments={setFineTuneAdjustments}/>
+              <FineTunePanels
+                adjustments={fineTuneAdjustments}
+                setAdjustments={(value) => {
+                  setFineTuneAdjustments(value)
+                  if (sourceData && method === 'local-parameters') {
+                    setOutputKind((current) => (current === 'generated' ? current : 'local'))
+                  }
+                }}
+              />
             </div>
           )}
         </div>
 
         <div className="grade-recipes__footer">
-          <div><span>当前执行方式</span><strong>{importedPreset ? 'Lightroom XMP · 本地渲染' : method === 'local-parameters' ? 'AI 参数 · 本地渲染' : 'AI 图像模型 · 云端生成'}</strong></div>
-          <span className={`execution-state ${activeRecipe ? 'is-ready' : ''}`}><i/>{activeRecipe ? '可执行' : '等待配方'}</span>
+          <div>
+            <span>当前执行方式</span>
+            <strong>
+              {importedPreset
+                ? 'Lightroom XMP · 本地渲染'
+                : method === 'local-parameters'
+                  ? (activeRecipe ? 'AI 参数 · 本地渲染' : '手动参数 · 本地渲染')
+                  : 'AI 图像模型 · 云端生成'}
+            </strong>
+          </div>
+          <span className={`execution-state ${hasPreviewResult ? 'is-ready' : ''}`}>
+            <i/>
+            {hasPreviewResult
+              ? (activeRecipe ? '可导出' : '手动调色中')
+              : '等待照片'}
+          </span>
         </div>
       </aside>
     </main>
