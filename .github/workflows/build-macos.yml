@@ -2,12 +2,20 @@ name: Build macOS
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing v* tag to build and publish
+        required: true
+        default: v0.1.0
   push:
     tags:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
 jobs:
   build-universal:
@@ -16,8 +24,10 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Check out repository
+      - name: Check out release source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -50,13 +60,24 @@ jobs:
             src-tauri/target/universal-apple-darwin/release/bundle/macos/ChromaTrace.app \
             src-tauri/target/universal-apple-darwin/release/bundle/macos/ChromaTrace.app.zip
 
-      - name: Upload macOS bundles
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ChromaTrace-macOS-universal
+          name: ChromaTrace-macOS-universal-${{ env.RELEASE_TAG }}
           path: |
             src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.zip
             src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+      - name: Publish bundles to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ChromaTrace ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.zip
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
