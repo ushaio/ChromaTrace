@@ -1,6 +1,7 @@
-import { ChevronDown, ChevronRight, RotateCcw } from 'lucide-react'
+import { ChevronDown, ChevronRight, Eye, EyeOff, RotateCcw } from 'lucide-react'
 import { useState, type CSSProperties, type Dispatch, type ReactNode, type SetStateAction } from 'react'
 import { CURVE_IDENTITY, HSL_CHANNELS } from '../lib/defaults'
+import type { FineTuneModuleId, FineTuneModuleVisibility } from '../lib/fineTuneVisibility'
 import type {
   Adjustments, ColorGradeZoneName, CurveChannel, HslChannel,
 } from '../lib/types'
@@ -10,19 +11,11 @@ import { CurveEditor } from './CurveEditor'
 interface FineTunePanelsProps {
   adjustments: Adjustments
   setAdjustments: Dispatch<SetStateAction<Adjustments>>
+  moduleVisibility: FineTuneModuleVisibility
+  setModuleVisibility: Dispatch<SetStateAction<FineTuneModuleVisibility>>
 }
 
 type NumericAdjustmentKey = Exclude<keyof Adjustments, 'curves' | 'hsl' | 'colorGrading' | 'calibration'>
-type ModuleId =
-  | 'light'
-  | 'color'
-  | 'curve'
-  | 'hsl'
-  | 'grading'
-  | 'calibration'
-  | 'detail'
-  | 'finish'
-
 const basicControls: Array<[NumericAdjustmentKey, string, number, number, number?]> = [
   ['exposure', '曝光', -3, 3, 0.05],
   ['contrast', '对比度', -100, 100],
@@ -68,6 +61,8 @@ interface CollapsibleModuleProps {
   meta?: ReactNode
   collapsed: boolean
   onToggle: () => void
+  enabled: boolean
+  onEnabledChange: () => void
   className?: string
   children: ReactNode
 }
@@ -77,11 +72,13 @@ function CollapsibleModule({
   meta,
   collapsed,
   onToggle,
+  enabled,
+  onEnabledChange,
   className = '',
   children,
 }: CollapsibleModuleProps) {
   return (
-    <section className={`module ${collapsed ? 'is-collapsed' : ''} ${className}`.trim()}>
+    <section className={`module ${collapsed ? 'is-collapsed' : ''} ${enabled ? '' : 'is-bypassed'} ${className}`.trim()}>
       <div className="module__heading">
         <button
           type="button"
@@ -92,6 +89,19 @@ function CollapsibleModule({
           onClick={onToggle}
         >
           {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+        </button>
+        <button
+          type={'button'}
+          className={'module__visibility'}
+          title={enabled ? `隐藏${title}效果` : `显示${title}效果`}
+          aria-label={enabled ? `隐藏${title}效果` : `显示${title}效果`}
+          aria-pressed={enabled}
+          onClick={(event) => {
+            event.stopPropagation()
+            onEnabledChange()
+          }}
+        >
+          {enabled ? <Eye size={14} /> : <EyeOff size={14} />}
         </button>
         <div
           className="module__title"
@@ -110,27 +120,36 @@ function CollapsibleModule({
   )
 }
 
-export function FineTunePanels({ adjustments, setAdjustments }: FineTunePanelsProps) {
+export function FineTunePanels({
+  adjustments,
+  setAdjustments,
+  moduleVisibility,
+  setModuleVisibility,
+}: FineTunePanelsProps) {
   const [curveChannel, setCurveChannel] = useState<CurveChannel>('master')
   const [hslChannel, setHslChannel] = useState<HslChannel>('orange')
   const [gradeZone, setGradeZone] = useState<ColorGradeZoneName>('shadows')
-  const [collapsed, setCollapsed] = useState<Partial<Record<ModuleId, boolean>>>({})
+  const [collapsed, setCollapsed] = useState<Partial<Record<FineTuneModuleId, boolean>>>({})
 
-  const isCollapsed = (id: ModuleId) => Boolean(collapsed[id])
-  const toggle = (id: ModuleId) => {
+  const isCollapsed = (id: FineTuneModuleId) => Boolean(collapsed[id])
+  const toggle = (id: FineTuneModuleId) => {
     setCollapsed((current) => ({ ...current, [id]: !current[id] }))
+  }
+  const isEnabled = (id: FineTuneModuleId) => moduleVisibility[id] !== false
+  const toggleEnabled = (id: FineTuneModuleId) => {
+    setModuleVisibility((current) => ({ ...current, [id]: current[id] === false }))
   }
 
   const setNumeric = (key: NumericAdjustmentKey, value: number) => {
     setAdjustments((current) => ({ ...current, [key]: value }))
   }
 
-  const setCurvePoint = (index: number, value: number) => {
+  const setCurveValues = (values: number[]) => {
     setAdjustments((current) => ({
       ...current,
       curves: {
         ...current.curves,
-        [curveChannel]: current.curves[curveChannel].map((point, pointIndex) => pointIndex === index ? value : point),
+        [curveChannel]: values,
       },
     }))
   }
@@ -161,6 +180,8 @@ export function FineTunePanels({ adjustments, setAdjustments }: FineTunePanelsPr
         title="基础明暗"
         collapsed={isCollapsed('light')}
         onToggle={() => toggle('light')}
+        enabled={isEnabled('light')}
+        onEnabledChange={() => toggleEnabled('light')}
       >
         {basicControls.map(([key, label, min, max, step]) => (
           <Control key={key} label={label} value={adjustments[key]} min={min} max={max} step={step} onChange={(value) => setNumeric(key, value)} />
@@ -171,6 +192,8 @@ export function FineTunePanels({ adjustments, setAdjustments }: FineTunePanelsPr
         title="基础色彩"
         collapsed={isCollapsed('color')}
         onToggle={() => toggle('color')}
+        enabled={isEnabled('color')}
+        onEnabledChange={() => toggleEnabled('color')}
       >
         {colorControls.map(([key, label, min, max]) => (
           <Control key={key} label={label} value={adjustments[key]} min={min} max={max} onChange={(value) => setNumeric(key, value)} />
@@ -178,7 +201,7 @@ export function FineTunePanels({ adjustments, setAdjustments }: FineTunePanelsPr
       </CollapsibleModule>
 
       <CollapsibleModule
-        title={`点曲线 · ${curveMeta[curveChannel].label}`}
+        title={`曲线 · ${curveMeta[curveChannel].label}`}
         meta={(
           <button
             type="button"
@@ -197,6 +220,8 @@ export function FineTunePanels({ adjustments, setAdjustments }: FineTunePanelsPr
         )}
         collapsed={isCollapsed('curve')}
         onToggle={() => toggle('curve')}
+        enabled={isEnabled('curve')}
+        onEnabledChange={() => toggleEnabled('curve')}
         className="curve-module"
       >
         <div className="compact-tabs" role="tablist" aria-label="曲线通道">
@@ -216,9 +241,8 @@ export function FineTunePanels({ adjustments, setAdjustments }: FineTunePanelsPr
           label={curveMeta[curveChannel].label}
           color={curveMeta[curveChannel].color}
           values={adjustments.curves[curveChannel]}
-          onChange={setCurvePoint}
+          onChange={setCurveValues}
         />
-        <p className="module__hint">自动分位数曲线作为基线；这里的点曲线用于二次精修。</p>
       </CollapsibleModule>
 
       <CollapsibleModule
@@ -226,6 +250,8 @@ export function FineTunePanels({ adjustments, setAdjustments }: FineTunePanelsPr
         meta={<span>{hslMeta[hslChannel].label}</span>}
         collapsed={isCollapsed('hsl')}
         onToggle={() => toggle('hsl')}
+        enabled={isEnabled('hsl')}
+        onEnabledChange={() => toggleEnabled('hsl')}
       >
         <div className="hsl-tabs" role="tablist" aria-label="HSL 色相通道">
           {HSL_CHANNELS.map((channel) => (
@@ -252,6 +278,8 @@ export function FineTunePanels({ adjustments, setAdjustments }: FineTunePanelsPr
         meta={<span>{gradeMeta[gradeZone].label}</span>}
         collapsed={isCollapsed('grading')}
         onToggle={() => toggle('grading')}
+        enabled={isEnabled('grading')}
+        onEnabledChange={() => toggleEnabled('grading')}
       >
         <div className="compact-tabs grade-tabs" role="tablist" aria-label="色彩分级区域">
           {(Object.keys(gradeMeta) as ColorGradeZoneName[]).map((zone) => (
@@ -282,6 +310,8 @@ export function FineTunePanels({ adjustments, setAdjustments }: FineTunePanelsPr
         title="三原色校准"
         collapsed={isCollapsed('calibration')}
         onToggle={() => toggle('calibration')}
+        enabled={isEnabled('calibration')}
+        onEnabledChange={() => toggleEnabled('calibration')}
       >
         <Control label="红原色色相" value={adjustments.calibration.redHue} min={-100} max={100} onChange={(value) => setAdjustments((current) => ({ ...current, calibration: { ...current.calibration, redHue: value } }))} />
         <Control label="红原色饱和度" value={adjustments.calibration.redSaturation} min={-100} max={100} onChange={(value) => setAdjustments((current) => ({ ...current, calibration: { ...current.calibration, redSaturation: value } }))} />
@@ -295,6 +325,8 @@ export function FineTunePanels({ adjustments, setAdjustments }: FineTunePanelsPr
         title="细节与清晰"
         collapsed={isCollapsed('detail')}
         onToggle={() => toggle('detail')}
+        enabled={isEnabled('detail')}
+        onEnabledChange={() => toggleEnabled('detail')}
       >
         <Control label="纹理" value={adjustments.texture} min={-100} max={100} onChange={(value) => setNumeric('texture', value)} />
         <Control label="清晰度" value={adjustments.clarity} min={-100} max={100} onChange={(value) => setNumeric('clarity', value)} />
@@ -313,6 +345,8 @@ export function FineTunePanels({ adjustments, setAdjustments }: FineTunePanelsPr
         title="质感与输出"
         collapsed={isCollapsed('finish')}
         onToggle={() => toggle('finish')}
+        enabled={isEnabled('finish')}
+        onEnabledChange={() => toggleEnabled('finish')}
       >
         <Control label="暗角" value={adjustments.vignette} min={-100} max={100} onChange={(value) => setNumeric('vignette', value)} />
         <Control label="暗角中点" value={adjustments.vignetteMidpoint} min={0} max={100} signed={false} onChange={(value) => setNumeric('vignetteMidpoint', value)} />

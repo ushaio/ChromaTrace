@@ -1,5 +1,6 @@
 ﻿import { describe, expect, it } from 'vitest'
-import { parseLightroomXmp } from './lightroomXmp'
+import { createDefaultAdjustments } from './defaults'
+import { parseLightroomXmp, serializeLightroomXmp } from './lightroomXmp'
 
 const xmp = `
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
@@ -58,8 +59,9 @@ describe('parseLightroomXmp', () => {
     expect(preset.adjustments.colorGrading.shadows.hue).toBe(205)
     expect(preset.adjustments.colorGrading.blending).toBe(62)
     expect(preset.adjustments.calibration.redHue).toBe(9)
-    expect(preset.adjustments.curves.master).toHaveLength(5)
+    expect(preset.adjustments.curves.master).toHaveLength(17)
     expect(preset.adjustments.curves.master[0]).toBeCloseTo(10 / 255)
+    expect(preset.adjustments.skinProtect).toBe(0)
     expect(preset.adjustments.texture).toBe(15)
     expect(preset.adjustments.clarity).toBe(22)
     expect(preset.adjustments.dehaze).toBe(8)
@@ -95,6 +97,25 @@ describe('parseLightroomXmp', () => {
     expect(preset.warnings.join(' ')).toContain('5500K')
   })
 
+  it('maps parametric curves and monochrome presets without AI skin protection', () => {
+    const preset = parseLightroomXmp(`
+      <x:xmpmeta xmlns:x='adobe:ns:meta/'>
+        <rdf:RDF xmlns:rdf='rdf'><rdf:Description xmlns:crs='camera-raw'
+          crs:ConvertToGrayscale='True' crs:ParametricShadows='-35'
+          crs:ParametricDarks='-20' crs:ParametricLights='30'
+          crs:ParametricHighlights='45' />
+        </rdf:RDF>
+      </x:xmpmeta>
+    `, 'mono-curve.xmp')
+
+    expect(preset.adjustments.saturation).toBe(-100)
+    expect(preset.adjustments.skinProtect).toBe(0)
+    expect(preset.adjustments.curves.master).toHaveLength(17)
+    expect(preset.adjustments.curves.master[3]).toBeLessThan(3 / 16)
+    expect(preset.adjustments.curves.master[13]).toBeGreaterThan(13 / 16)
+    expect(preset.mappedFields).toContain('参数曲线')
+  })
+
   it('rejects unrelated or geometry-only XMP files', () => {
     expect(() => parseLightroomXmp('<root/>')).toThrow('未识别')
     expect(() => parseLightroomXmp(`
@@ -102,5 +123,29 @@ describe('parseLightroomXmp', () => {
         <rdf:Description xmlns:crs="camera-raw" crs:CropTop="0.1" crs:PerspectiveVertical="5" />
       </rdf:RDF></x:xmpmeta>
     `)).toThrow('没有可映射')
+  })
+
+  it('serializes saved adjustments for a complete round trip', () => {
+    const adjustments = createDefaultAdjustments()
+    adjustments.exposure = 0.65
+    adjustments.temperature = 18
+    adjustments.fade = 12
+    adjustments.hsl.orange.saturation = -14
+    adjustments.colorGrading.highlights.hue = 52
+    adjustments.colorGrading.highlights.saturation = 20
+    adjustments.calibration.blueHue = -8
+    adjustments.curves.master = [0.04, 0.22, 0.51, 0.8, 0.96]
+
+    const serialized = serializeLightroomXmp(adjustments, 'My / Preset')
+    const preset = parseLightroomXmp(serialized, 'My _ Preset.xmp')
+
+    expect(preset.name).toBe('My _ Preset')
+    expect(preset.adjustments.exposure).toBe(0.65)
+    expect(preset.adjustments.temperature).toBe(18)
+    expect(preset.adjustments.fade).toBe(12)
+    expect(preset.adjustments.hsl.orange.saturation).toBe(-14)
+    expect(preset.adjustments.colorGrading.highlights.saturation).toBe(20)
+    expect(preset.adjustments.calibration.blueHue).toBe(-8)
+    expect(preset.adjustments.curves.master[0]).toBeCloseTo(10 / 255)
   })
 })

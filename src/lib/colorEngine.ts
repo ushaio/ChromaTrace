@@ -546,7 +546,7 @@ function applyBasicAdjustments(rgb: RGB, adjustments: Adjustments): RGB {
 }
 
 function normalizedCurve(points: number[]) {
-  if (points.length !== 5 || points.some((value) => !Number.isFinite(value))) return [0, 0.25, 0.5, 0.75, 1]
+  if (points.length < 2 || points.some((value) => !Number.isFinite(value))) return [0, 0.25, 0.5, 0.75, 1]
   const normalized = points.map((value) => clamp(value))
   for (let index = 1; index < normalized.length; index += 1) {
     normalized[index] = Math.max(normalized[index], normalized[index - 1])
@@ -564,8 +564,9 @@ export function sampleAdjustmentCurve(value: number, points: number[]) {
 }
 
 function applyCurves(rgb: RGB, adjustments: Adjustments): RGB {
-  const lab = rgbToOklab(rgb)
-  const master = oklabToRgb([sampleAdjustmentCurve(lab[0], adjustments.curves.master), lab[1], lab[2]])
+  // Camera Raw point curves use encoded 0..255 RGB values. Treating the
+  // composite curve as OKLab L crushes lifted blacks and weakens S-curves.
+  const master = rgb.map((value) => sampleAdjustmentCurve(value, adjustments.curves.master)) as RGB
   return [
     sampleAdjustmentCurve(master[0], adjustments.curves.red),
     sampleAdjustmentCurve(master[1], adjustments.curves.green),
@@ -685,6 +686,9 @@ function blurSample(
   radius: number,
 ): RGB {
   const steps = radius <= 1.25 ? 1 : 2
+  const center = samplePixel(data, width, height, x, y)
+  const centerLuma = encodedLuma(center[0], center[1], center[2])
+  const rangeSigma = 0.07 + Math.min(radius, 3) * 0.025
   let r = 0
   let g = 0
   let b = 0
@@ -694,7 +698,9 @@ function blurSample(
       const distance = Math.hypot(ox, oy)
       if (distance > steps + 0.01) continue
       const sample = samplePixel(data, width, height, x + ox, y + oy)
-      const w = 1 / (1 + distance)
+      const lumaDelta = encodedLuma(sample[0], sample[1], sample[2]) - centerLuma
+      const rangeWeight = Math.exp(-0.5 * (lumaDelta / rangeSigma) ** 2)
+      const w = rangeWeight / (1 + distance)
       r += sample[0] * w
       g += sample[1] * w
       b += sample[2] * w
@@ -724,10 +730,11 @@ function applySpatialPixel(
     const broadDetail: RGB = [original[0] - broad[0], original[1] - broad[1], original[2] - broad[2]]
     const luma = encodedLuma(original[0], original[1], original[2])
     const midMask = 1 - clamp(Math.abs(luma - 0.5) * 2)
+    const highlightProtect = 1 - clamp((luma - 0.86) / 0.14) * 0.75
     rgb = [
-      clamp(rgb[0] + fineDetail[0] * textureAmount * 0.85 + broadDetail[0] * clarityAmount * 0.55 * midMask),
-      clamp(rgb[1] + fineDetail[1] * textureAmount * 0.85 + broadDetail[1] * clarityAmount * 0.55 * midMask),
-      clamp(rgb[2] + fineDetail[2] * textureAmount * 0.85 + broadDetail[2] * clarityAmount * 0.55 * midMask),
+      clamp(rgb[0] + (fineDetail[0] * textureAmount * 0.85 + broadDetail[0] * clarityAmount * 0.55 * midMask) * highlightProtect),
+      clamp(rgb[1] + (fineDetail[1] * textureAmount * 0.85 + broadDetail[1] * clarityAmount * 0.55 * midMask) * highlightProtect),
+      clamp(rgb[2] + (fineDetail[2] * textureAmount * 0.85 + broadDetail[2] * clarityAmount * 0.55 * midMask) * highlightProtect),
     ]
   }
 

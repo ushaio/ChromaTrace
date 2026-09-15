@@ -6,15 +6,55 @@
 //!
 //! Asset identity is the relative path under the kind root (POSIX-style `/`).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 const MAX_FOLDER_DEPTH: usize = 8;
 const MAX_FOLDER_FILES: usize = 2000;
+const LIBRARY_LOCATION_FILE: &str = "library-location.json";
+const MIGRATION_EVENT: &str = "library-migration-progress";
+static LIBRARY_MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryLocation {
+    pub path: String,
+    pub is_custom: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryLocationConfig {
+    path: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMigrationProgress {
+    pub migration_id: String,
+    pub phase: String,
+    pub copied_bytes: u64,
+    pub total_bytes: u64,
+    pub copied_files: u32,
+    pub total_files: u32,
+    pub percent: f64,
+    pub current_file: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMigrationResult {
+    pub path: String,
+    pub copied_bytes: u64,
+    pub copied_files: u32,
+    pub cleanup_warning: Option<String>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssetKind {
@@ -67,12 +107,67 @@ pub struct LibraryAsset {
     pub lut_size: Option<u32>,
 }
 
-fn library_root(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
+fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
         .app_data_dir()
-        .map_err(|error| format!("无法解析应用数据目录：{error}"))?;
-    Ok(dir.join("library"))
+        .map_err(|error| format!("无法解析应用数据目录：{error}"))
+}
+
+fn default_library_root(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app_data_dir(app)?.join("library"))
+}
+
+fn library_location_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app_data_dir(app)?.join(LIBRARY_LOCATION_FILE))
+}
+
+fn configured_library_root(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    let config_path = library_location_config_path(app)?;
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&config_path)
+        .map_err(|error| format!("无法读取资料库位置配置：{error}"))?;
+    let config: LibraryLocationConfig =
+        serde_json::from_str(&text).map_err(|error| format!("资料库位置配置无效：{error}"))?;
+    let path = PathBuf::from(config.path.trim());
+    if !path.is_absolute() {
+        return Err("资料库位置必须是绝对路径".into());
+    }
+    Ok(Some(path))
+}
+
+fn library_root(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(configured_library_root(app)?.unwrap_or(default_library_root(app)?))
+}
+
+fn write_library_location(app: &AppHandle, path: &Path) -> Result<(), String> {
+    let config_path = library_location_config_path(app)?;
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| "资料库位置配置路径无效".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("无法创建应用数据目录：{error}"))?;
+    let config = LibraryLocationConfig {
+        path: path.to_string_lossy().into_owned(),
+    };
+    let data = serde_json::to_vec_pretty(&config)
+        .map_err(|error| format!("无法序列化资料库位置：{error}"))?;
+    let temporary = config_path.with_extension("json.tmp");
+    fs::write(&temporary, data).map_err(|error| format!("无法保存资料库位置：{error}"))?;
+    #[cfg(target_os = "windows")]
+    if config_path.exists() {
+        let backup = config_path.with_extension("json.bak");
+        let _ = fs::remove_file(&backup);
+        fs::rename(&config_path, &backup)
+            .map_err(|error| format!("无法备份原资料库位置配置：{error}"))?;
+        if let Err(error) = fs::rename(&temporary, &config_path) {
+            let _ = fs::rename(&backup, &config_path);
+            return Err(format!("无法启用新资料库位置：{error}"));
+        }
+        let _ = fs::remove_file(&backup);
+        return Ok(());
+    }
+    fs::rename(&temporary, &config_path).map_err(|error| format!("无法启用新资料库位置：{error}"))
 }
 
 fn kind_dir(app: &AppHandle, kind: AssetKind) -> Result<PathBuf, String> {
@@ -416,6 +511,360 @@ fn copy_into_library(
     })?;
     asset_from_file(kind, root, &target, &unique)
         .ok_or_else(|| format!("导入后无法读取：{}", target.display()))
+}
+
+fn path_key(path: &Path) -> String {
+    let value = path.to_string_lossy().replace('\\', "/");
+    if cfg!(target_os = "windows") {
+        value.to_ascii_lowercase()
+    } else {
+        value
+    }
+}
+
+fn path_is_within(path: &Path, parent: &Path) -> bool {
+    let path = path_key(path);
+    let mut parent = path_key(parent);
+    while parent.ends_with('/') {
+        parent.pop();
+    }
+    path == parent || path.starts_with(&format!("{parent}/"))
+}
+
+fn collect_migration_entries(
+    root: &Path,
+    current: &Path,
+    directories: &mut Vec<PathBuf>,
+    files: &mut Vec<(PathBuf, u64)>,
+) -> Result<(), String> {
+    for entry in fs::read_dir(current)
+        .map_err(|error| format!("无法扫描资料库目录 {}：{error}", current.display()))?
+    {
+        let entry = entry.map_err(|error| format!("无法读取资料库条目：{error}"))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("无法读取资料库条目类型 {}：{error}", path.display()))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "资料库包含不支持迁移的符号链接：{}",
+                path.display()
+            ));
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| format!("资料库条目路径无效：{}", path.display()))?
+            .to_path_buf();
+        if file_type.is_dir() {
+            directories.push(relative);
+            collect_migration_entries(root, &path, directories, files)?;
+        } else if file_type.is_file() {
+            let size = entry
+                .metadata()
+                .map_err(|error| format!("无法读取文件信息 {}：{error}", path.display()))?
+                .len();
+            files.push((relative, size));
+        }
+    }
+    Ok(())
+}
+
+fn emit_migration_progress(
+    app: &AppHandle,
+    migration_id: &str,
+    phase: &str,
+    copied_bytes: u64,
+    total_bytes: u64,
+    copied_files: u32,
+    total_files: u32,
+    current_file: Option<String>,
+) {
+    let percent = if phase == "completed" {
+        100.0
+    } else if total_bytes > 0 {
+        (copied_bytes as f64 / total_bytes as f64 * 98.0).min(98.0)
+    } else if total_files > 0 {
+        (copied_files as f64 / total_files as f64 * 98.0).min(98.0)
+    } else if phase == "finalizing" {
+        99.0
+    } else {
+        0.0
+    };
+    let _ = app.emit(
+        MIGRATION_EVENT,
+        LibraryMigrationProgress {
+            migration_id: migration_id.to_string(),
+            phase: phase.to_string(),
+            copied_bytes,
+            total_bytes,
+            copied_files,
+            total_files,
+            percent,
+            current_file,
+        },
+    );
+}
+
+fn copy_file_with_progress(
+    app: &AppHandle,
+    migration_id: &str,
+    source: &Path,
+    target: &Path,
+    display_path: &str,
+    copied_bytes: &mut u64,
+    total_bytes: u64,
+    copied_files: u32,
+    total_files: u32,
+) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("无法创建目标文件夹 {}：{error}", parent.display()))?;
+    }
+    let mut reader = fs::File::open(source)
+        .map_err(|error| format!("无法读取资料库文件 {}：{error}", source.display()))?;
+    let mut writer = fs::File::create(target)
+        .map_err(|error| format!("无法创建目标文件 {}：{error}", target.display()))?;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("读取资料库文件失败 {}：{error}", source.display()))?;
+        if read == 0 {
+            break;
+        }
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|error| format!("写入目标文件失败 {}：{error}", target.display()))?;
+        *copied_bytes = copied_bytes.saturating_add(read as u64);
+        emit_migration_progress(
+            app,
+            migration_id,
+            "copying",
+            *copied_bytes,
+            total_bytes,
+            copied_files,
+            total_files,
+            Some(display_path.to_string()),
+        );
+    }
+    writer
+        .sync_all()
+        .map_err(|error| format!("无法完成目标文件写入 {}：{error}", target.display()))?;
+    if let Ok(metadata) = fs::metadata(source) {
+        let _ = fs::set_permissions(target, metadata.permissions());
+    }
+    Ok(())
+}
+
+fn migrate_library_blocking(
+    app: AppHandle,
+    destination_path: String,
+    migration_id: String,
+) -> Result<LibraryMigrationResult, String> {
+    let lock = LIBRARY_MIGRATION_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock
+        .try_lock()
+        .map_err(|_| "已有资料库迁移任务正在进行，请稍候".to_string())?;
+
+    let source = library_root(&app)?;
+    fs::create_dir_all(&source).map_err(|error| format!("无法访问当前资料库：{error}"))?;
+    let source =
+        fs::canonicalize(&source).map_err(|error| format!("无法解析当前资料库路径：{error}"))?;
+
+    let destination_text = destination_path.trim();
+    if destination_text.is_empty() {
+        return Err("请选择新的资料库文件夹".into());
+    }
+    let destination = PathBuf::from(destination_text);
+    if !destination.is_absolute() {
+        return Err("新的资料库位置必须是绝对路径".into());
+    }
+    fs::create_dir_all(&destination)
+        .map_err(|error| format!("无法创建新的资料库文件夹：{error}"))?;
+    let destination = fs::canonicalize(&destination)
+        .map_err(|error| format!("无法解析新的资料库路径：{error}"))?;
+
+    if path_is_within(&destination, &source) || path_is_within(&source, &destination) {
+        return Err("新旧资料库路径不能相同，也不能互为父子文件夹".into());
+    }
+    let mut existing =
+        fs::read_dir(&destination).map_err(|error| format!("无法检查新的资料库文件夹：{error}"))?;
+    if existing.next().is_some() {
+        return Err("新的资料库文件夹必须为空，请选择或新建一个空文件夹".into());
+    }
+
+    emit_migration_progress(&app, &migration_id, "scanning", 0, 0, 0, 0, None);
+    let mut directories = Vec::new();
+    let mut files = Vec::new();
+    collect_migration_entries(&source, &source, &mut directories, &mut files)?;
+    let total_bytes = files.iter().map(|(_, size)| *size).sum::<u64>();
+    let total_files = u32::try_from(files.len()).unwrap_or(u32::MAX);
+    emit_migration_progress(
+        &app,
+        &migration_id,
+        "copying",
+        0,
+        total_bytes,
+        0,
+        total_files,
+        None,
+    );
+
+    let staging = destination.join(format!(".chromatrace-migration-{migration_id}"));
+    fs::create_dir(&staging).map_err(|error| format!("无法创建迁移暂存目录：{error}"))?;
+    let migration_result = (|| -> Result<(u64, u32), String> {
+        for relative in &directories {
+            fs::create_dir_all(staging.join(relative))
+                .map_err(|error| format!("无法创建目标子文件夹 {}：{error}", relative.display()))?;
+        }
+        let mut copied_bytes = 0u64;
+        let mut copied_files = 0u32;
+        for (relative, _) in &files {
+            let display_path = relative.to_string_lossy().replace('\\', "/");
+            copy_file_with_progress(
+                &app,
+                &migration_id,
+                &source.join(relative),
+                &staging.join(relative),
+                &display_path,
+                &mut copied_bytes,
+                total_bytes,
+                copied_files,
+                total_files,
+            )?;
+            copied_files = copied_files.saturating_add(1);
+            emit_migration_progress(
+                &app,
+                &migration_id,
+                "copying",
+                copied_bytes,
+                total_bytes,
+                copied_files,
+                total_files,
+                Some(display_path),
+            );
+        }
+
+        emit_migration_progress(
+            &app,
+            &migration_id,
+            "finalizing",
+            copied_bytes,
+            total_bytes,
+            copied_files,
+            total_files,
+            None,
+        );
+        let staged_entries =
+            fs::read_dir(&staging).map_err(|error| format!("无法读取迁移暂存目录：{error}"))?;
+        for entry in staged_entries {
+            let entry = entry.map_err(|error| format!("无法读取迁移暂存条目：{error}"))?;
+            let target = destination.join(entry.file_name());
+            fs::rename(entry.path(), &target)
+                .map_err(|error| format!("无法启用迁移文件 {}：{error}", target.display()))?;
+        }
+        fs::remove_dir(&staging).map_err(|error| format!("无法清理迁移暂存目录：{error}"))?;
+        write_library_location(&app, &destination)?;
+        Ok((copied_bytes, copied_files))
+    })();
+
+    let (copied_bytes, copied_files) = match migration_result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            if let Ok(entries) = fs::read_dir(&destination) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let _ = fs::remove_dir_all(path);
+                    } else {
+                        let _ = fs::remove_file(path);
+                    }
+                }
+            }
+            return Err(error);
+        }
+    };
+
+    let cleanup_warning = if source.exists() {
+        match fs::remove_dir_all(&source) {
+            Ok(()) => None,
+            Err(error) => Some(format!(
+                "新资料库已启用，但旧资料库未能自动删除（{}）：{error}",
+                source.display()
+            )),
+        }
+    } else {
+        None
+    };
+    emit_migration_progress(
+        &app,
+        &migration_id,
+        "completed",
+        copied_bytes,
+        total_bytes,
+        copied_files,
+        total_files,
+        None,
+    );
+    Ok(LibraryMigrationResult {
+        path: destination.to_string_lossy().into_owned(),
+        copied_bytes,
+        copied_files,
+        cleanup_warning,
+    })
+}
+
+#[tauri::command]
+pub fn get_library_location(app: AppHandle) -> Result<LibraryLocation, String> {
+    let path = library_root(&app)?;
+    fs::create_dir_all(&path).map_err(|error| format!("无法创建资料库目录：{error}"))?;
+    let default = default_library_root(&app)?;
+    Ok(LibraryLocation {
+        is_custom: path_key(&path) != path_key(&default),
+        path: path.to_string_lossy().into_owned(),
+    })
+}
+
+#[tauri::command]
+pub fn open_library_folder(app: AppHandle) -> Result<(), String> {
+    let path = library_root(&app)?;
+    fs::create_dir_all(&path).map_err(|error| format!("无法创建资料库目录：{error}"))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new("explorer.exe")
+            .arg(&path)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|error| format!("无法在文件资源管理器中打开资料库：{error}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    Command::new("open")
+        .arg(&path)
+        .spawn()
+        .map_err(|error| format!("无法在访达中打开资料库：{error}"))?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .map_err(|error| format!("无法打开资料库文件夹：{error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn migrate_library_location(
+    app: AppHandle,
+    destination_path: String,
+    migration_id: String,
+) -> Result<LibraryMigrationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        migrate_library_blocking(app, destination_path, migration_id)
+    })
+    .await
+    .map_err(|error| format!("资料库迁移任务异常结束：{error}"))?
 }
 
 #[tauri::command]

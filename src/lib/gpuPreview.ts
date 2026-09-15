@@ -12,7 +12,8 @@ const HSL_CHANNELS: HslChannel[] = [
   'magenta',
 ]
 
-const IDENTITY_CURVE = [0, 0.25, 0.5, 0.75, 1]
+const GPU_CURVE_SAMPLES = 17
+const IDENTITY_CURVE = Array.from({ length: GPU_CURVE_SAMPLES }, (_, index) => index / (GPU_CURVE_SAMPLES - 1))
 
 const VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -47,7 +48,7 @@ uniform vec4 uMatch;
 uniform vec4 uDetail0;
 uniform vec4 uDetail1;
 uniform vec4 uDetail2;
-uniform float uCurves[20];
+uniform float uCurves[68];
 uniform vec3 uHsl[8];
 uniform vec3 uGrade[3];
 uniform vec2 uGradeMeta;
@@ -57,6 +58,7 @@ uniform vec3 uSourceZones[3];
 uniform vec3 uTargetZones[3];
 uniform vec2 uResolution;
 uniform int uHasProfile;
+uniform int uStage;
 uniform highp sampler3D uLut;
 uniform int uHasLut;
 uniform float uLutAmount;
@@ -320,20 +322,23 @@ vec3 applyDehaze(vec3 rgb) {
 }
 
 float sampleCurve(float value, int offset) {
-  float position = saturate(value) * 4.0;
+  float position = saturate(value) * 16.0;
   int lower = int(floor(position));
-  int upper = min(4, lower + 1);
+  int upper = min(16, lower + 1);
   float fraction = position - float(lower);
   return saturate(mix(uCurves[offset + lower], uCurves[offset + upper], fraction));
 }
 
 vec3 applyCurves(vec3 rgb) {
-  vec3 lab = rgbToOklab(rgb);
-  vec3 master = oklabToRgb(vec3(sampleCurve(lab.x, 0), lab.y, lab.z));
+  vec3 master = vec3(
+    sampleCurve(rgb.r, 0),
+    sampleCurve(rgb.g, 0),
+    sampleCurve(rgb.b, 0)
+  );
   return vec3(
-    sampleCurve(master.r, 5),
-    sampleCurve(master.g, 10),
-    sampleCurve(master.b, 15)
+    sampleCurve(master.r, 17),
+    sampleCurve(master.g, 34),
+    sampleCurve(master.b, 51)
   );
 }
 
@@ -397,19 +402,26 @@ float pseudoRandom(float seed) {
 }
 
 vec3 sampleSourceRgb(vec2 uv) {
-  return texture(uSource, vec2(uv.x, 1.0 - uv.y)).rgb;
+  vec2 sampleUv = uStage == 1 ? vec2(uv.x, 1.0 - uv.y) : uv;
+  return texture(uSource, sampleUv).rgb;
 }
 
 vec3 blurSource(vec2 uv, float radiusPx) {
   vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+  vec3 center = sampleSourceRgb(uv);
+  float centerLuma = encodedLuma(center);
+  float rangeSigma = 0.07 + min(radiusPx, 3.0) * 0.025;
   vec3 sum = vec3(0.0);
   float weight = 0.0;
   for (int oy = -2; oy <= 2; oy += 1) {
     for (int ox = -2; ox <= 2; ox += 1) {
       float sampleDist = length(vec2(float(ox), float(oy)));
       if (sampleDist > radiusPx + 0.01) continue;
-      float w = 1.0 / (1.0 + sampleDist);
-      sum += sampleSourceRgb(uv + vec2(float(ox), float(oy)) * texel * max(radiusPx * 0.5, 1.0)) * w;
+      vec3 sampleRgb = sampleSourceRgb(uv + vec2(float(ox), float(oy)) * texel * max(radiusPx * 0.5, 1.0));
+      float lumaDelta = encodedLuma(sampleRgb) - centerLuma;
+      float rangeWeight = exp(-0.5 * lumaDelta * lumaDelta / (rangeSigma * rangeSigma));
+      float w = rangeWeight / (1.0 + sampleDist);
+      sum += sampleRgb * w;
       weight += w;
     }
   }
@@ -426,9 +438,6 @@ vec3 applySpatialDetail(vec3 rgb, vec2 uv) {
   float lumaNr = uDetail1.w / 100.0;
   float colorNr = uDetail2.x / 100.0;
 
-  // Spatial detail is computed from the graded color neighborhood by sampling
-  // the already-graded path is unavailable in a single pass; approximate with
-  // source-neighborhood structure scaled onto current rgb deltas from center.
   vec3 center = sampleSourceRgb(uv);
   if (abs(textureAmount) > 0.0001 || abs(clarityAmount) > 0.0001) {
     vec3 fine = blurSource(uv, 1.0);
@@ -437,7 +446,8 @@ vec3 applySpatialDetail(vec3 rgb, vec2 uv) {
     vec3 broadDetail = center - broad;
     float luma = encodedLuma(rgb);
     float midMask = 1.0 - saturate(abs(luma - 0.5) * 2.0);
-    rgb += fineDetail * textureAmount * 0.85 + broadDetail * clarityAmount * 0.55 * midMask;
+    float highlightProtect = 1.0 - smoothstep(0.86, 1.0, encodedLuma(center)) * 0.75;
+    rgb += (fineDetail * textureAmount * 0.85 + broadDetail * clarityAmount * 0.55 * midMask) * highlightProtect;
   }
 
   if (sharpenAmount > 0.0001) {
@@ -479,18 +489,24 @@ vec3 applyVignette(vec3 rgb, vec2 uv) {
 
 void main() {
   vec2 uv = vUv;
-  vec4 source = texture(uSource, vec2(uv.x, 1.0 - uv.y));
-  vec3 rgb = applyCrossImageTransfer(source.rgb);
-  rgb = applyCalibration(rgb);
-  rgb = applyBasicAdjustments(rgb);
-  rgb = applyDehaze(rgb);
-  rgb = applyCurves(rgb);
-  rgb = applyHslAdjustments(rgb);
-  rgb = applyColorGrading(rgb);
-  // Skip the expensive neighborhood pass when all detail controls are neutral.
+  vec4 source = vec4(sampleSourceRgb(uv), 1.0);
+  vec3 rgb = source.rgb;
+
+  if (uStage == 1) {
+    rgb = applyCrossImageTransfer(rgb);
+    rgb = applyCalibration(rgb);
+    rgb = applyBasicAdjustments(rgb);
+    rgb = applyDehaze(rgb);
+    rgb = applyCurves(rgb);
+    rgb = applyHslAdjustments(rgb);
+    rgb = applyColorGrading(rgb);
+    outColor = vec4(saturate3(rgb), source.a);
+    return;
+  }
+
   if (abs(uDetail0.x) + abs(uDetail0.y) + abs(uDetail0.w)
-    + abs(uDetail1.w) + abs(uDetail2.x) > 0.0001) {
-    rgb = applySpatialDetail(rgb, uv);
+      + abs(uDetail1.w) + abs(uDetail2.x) > 0.0001) {
+      rgb = applySpatialDetail(rgb, uv);
   }
   rgb = applyVignette(rgb, uv);
 
@@ -527,14 +543,19 @@ export interface PackedGpuAdjustments {
 }
 
 function normalizeCurve(points: number[]) {
-  if (points.length !== 5 || points.some((value) => !Number.isFinite(value))) {
+  if (points.length < 2 || points.some((value) => !Number.isFinite(value))) {
     return [...IDENTITY_CURVE]
   }
   const normalized = points.map((value) => Math.min(1, Math.max(0, value)))
   for (let index = 1; index < normalized.length; index += 1) {
     normalized[index] = Math.max(normalized[index - 1], normalized[index])
   }
-  return normalized
+  return IDENTITY_CURVE.map((_, index) => {
+    const position = index / (GPU_CURVE_SAMPLES - 1) * (normalized.length - 1)
+    const lower = Math.floor(position)
+    const upper = Math.min(normalized.length - 1, lower + 1)
+    return normalized[lower] + (normalized[upper] - normalized[lower]) * (position - lower)
+  })
 }
 
 export function packGpuAdjustments(adjustments: Adjustments): PackedGpuAdjustments {
@@ -701,6 +722,8 @@ export class GpuPreviewRenderer {
   private readonly outputContext: CanvasRenderingContext2D
   private readonly program: WebGLProgram
   private readonly sourceTexture: WebGLTexture
+  private readonly gradedTexture: WebGLTexture
+  private readonly gradedFramebuffer: WebGLFramebuffer
   private readonly toneCurveTexture: WebGLTexture
   private readonly toneCdfTexture: WebGLTexture
   private readonly lutTexture: WebGLTexture
@@ -739,6 +762,10 @@ export class GpuPreviewRenderer {
     this.gl = gl
     this.program = createProgram(gl)
     this.sourceTexture = createTexture(gl, 0)
+    this.gradedTexture = createTexture(gl, 4)
+    const gradedFramebuffer = gl.createFramebuffer()
+    if (!gradedFramebuffer) throw new Error('Unable to create graded preview framebuffer')
+    this.gradedFramebuffer = gradedFramebuffer
     this.toneCurveTexture = createTexture(gl, 1)
     this.toneCdfTexture = createTexture(gl, 2)
     const lutTexture = gl.createTexture()
@@ -754,6 +781,7 @@ export class GpuPreviewRenderer {
       'uDetail0', 'uDetail1', 'uDetail2',
       'uCurves[0]', 'uHsl[0]', 'uGrade[0]', 'uGradeMeta', 'uCalibration0', 'uCalibration1',
       'uSourceZones[0]', 'uTargetZones[0]', 'uResolution', 'uHasProfile',
+      'uStage',
       'uLut', 'uHasLut', 'uLutAmount', 'uLutDomainMin', 'uLutDomainMax',
     ]
     for (const name of uniformNames) {
@@ -764,6 +792,7 @@ export class GpuPreviewRenderer {
 
     gl.useProgram(this.program)
     gl.uniform1i(this.uniforms.uSource, 0)
+    gl.uniform1i(this.uniforms.uStage, 1)
     gl.uniform1i(this.uniforms.uToneCurve, 1)
     gl.uniform1i(this.uniforms.uToneCdf, 2)
     gl.uniform1i(this.uniforms.uLut, 3)
@@ -875,6 +904,16 @@ export class GpuPreviewRenderer {
     this.renderCanvas.height = height
     this.canvas.width = width
     this.canvas.height = height
+    gl.activeTexture(gl.TEXTURE4)
+    gl.bindTexture(gl.TEXTURE_2D, this.gradedTexture)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.gradedFramebuffer)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.gradedTexture, 0)
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+      throw new Error('Unable to allocate graded preview framebuffer')
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
     gl.viewport(0, 0, width, height)
   }
 
@@ -973,6 +1012,20 @@ export class GpuPreviewRenderer {
       this.profile = profile
     }
     gl.uniform1i(this.uniforms.uHasProfile, profile ? 1 : 0)
+    // Pass 1 writes the complete color grade into an intermediate texture.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.gradedFramebuffer)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture)
+    gl.uniform1i(this.uniforms.uSource, 0)
+    gl.uniform1i(this.uniforms.uStage, 1)
+    gl.drawArrays(gl.TRIANGLES, 0, 3)
+
+    // Pass 2 samples only graded neighbors for detail and noise reduction.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    gl.activeTexture(gl.TEXTURE4)
+    gl.bindTexture(gl.TEXTURE_2D, this.gradedTexture)
+    gl.uniform1i(this.uniforms.uSource, 4)
+    gl.uniform1i(this.uniforms.uStage, 2)
     gl.drawArrays(gl.TRIANGLES, 0, 3)
     if (!this.validated) {
       // Synchronize only the first frame after a source upload. Slider frames
@@ -993,6 +1046,8 @@ export class GpuPreviewRenderer {
     this.disposed = true
     const { gl } = this
     gl.deleteTexture(this.sourceTexture)
+    gl.deleteTexture(this.gradedTexture)
+    gl.deleteFramebuffer(this.gradedFramebuffer)
     gl.deleteTexture(this.toneCurveTexture)
     gl.deleteTexture(this.toneCdfTexture)
     gl.deleteTexture(this.lutTexture)

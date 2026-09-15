@@ -31,6 +31,7 @@ import {
   imageToViewportImageData, loadImageBytes, loadImageFile, type LoadedImage,
 } from './lib/files'
 import { createDefaultAdjustments, DEFAULT_MODEL_SETTINGS } from './lib/defaults'
+import { applyFineTuneModuleVisibility, type FineTuneModuleVisibility } from './lib/fineTuneVisibility'
 import { GpuPreviewRenderer } from './lib/gpuPreview'
 import { resolveImageModel, resolveVisionModel } from './lib/modelSettings'
 import type { Adjustments, ColorStats, MatchProfile, ModelColorParameters, ModelSettings } from './lib/types'
@@ -78,6 +79,7 @@ function App() {
   const [sourceStats, setSourceStats] = useState<ColorStats | null>(null)
   const [referenceStats, setReferenceStats] = useState<ColorStats | null>(null)
   const [adjustments, setAdjustments] = useState<Adjustments>(createDefaultAdjustments)
+  const [fineTuneVisibility, setFineTuneVisibility] = useState<FineTuneModuleVisibility>({})
   const [panel, setPanel] = useState<Panel>('match')
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('match')
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance')
@@ -141,6 +143,10 @@ function App() {
   const visionApiKeyPresent = activeVisionModel ? Boolean(credentialStatus[activeVisionModel.providerId]) : false
   const imageApiKeyPresent = activeImageModel ? Boolean(credentialStatus[activeImageModel.providerId]) : false
   const activeMatchProfile = matchRenderMode === 'local' ? profile : null
+  const visibleAdjustments = useMemo(
+    () => applyFineTuneModuleVisibility(adjustments, fineTuneVisibility),
+    [adjustments, fineTuneVisibility],
+  )
   const hasResult = Boolean(sourceData && matchRenderMode !== 'none')
   const modelBusy = modelTask !== 'idle'
   const matchMethodLabel = matchRenderMode === 'ai'
@@ -325,7 +331,7 @@ function App() {
     let disposed = false
     const canvas = gpuResultCanvas.current
     const sourceImage = matchPreviewData
-    const initialAdjustments = adjustments
+    const initialAdjustments = visibleAdjustments
     const initialProfile = activeMatchProfile
 
     const paintCpuPreview = () => {
@@ -377,7 +383,7 @@ function App() {
   }, [workspaceMode, matchPreviewData])
 
   useEffect(() => {
-    pendingGpuPreview.current = { adjustments, profile: activeMatchProfile }
+    pendingGpuPreview.current = { adjustments: visibleAdjustments, profile: activeMatchProfile }
     if (workspaceMode !== 'match' || !matchPreviewData || previewFrame.current !== null) return
 
     previewFrame.current = window.requestAnimationFrame(() => {
@@ -406,7 +412,7 @@ function App() {
         )
       }
     })
-  }, [workspaceMode, matchPreviewData, adjustments, activeMatchProfile, previewEngine])
+  }, [workspaceMode, matchPreviewData, visibleAdjustments, activeMatchProfile, previewEngine])
 
   useEffect(() => {
     if (!isTauri()) return
@@ -437,6 +443,7 @@ function App() {
     // Stats / match profile use a fixed analysis budget; on-screen preview is viewport-sized separately.
     const data = imageToImageData(loaded.element, ANALYSIS_MAX_SIDE)
     setAdjustments(createDefaultAdjustments())
+    setFineTuneVisibility({})
     if (kind === 'source') {
       if (sourceRef.current) URL.revokeObjectURL(sourceRef.current.url)
       setSource(loaded)
@@ -495,6 +502,7 @@ function App() {
       colorMatchStrength: 0,
       preserveLuma: 100,
     })
+    setFineTuneVisibility({})
     setMatchRenderMode('ai')
     setModelStyle(styleDescription)
   }
@@ -509,6 +517,7 @@ function App() {
       ...createDefaultAdjustments(),
       ...controls,
     })
+    setFineTuneVisibility({})
     setMatchRenderMode('local')
     setModelStyle('本地 OKLab 快速匹配')
     if (showToast) notify('本地快速匹配已应用；建议仅用于场景和光线接近的照片')
@@ -572,7 +581,7 @@ function App() {
 
     setModelTask('refine')
     try {
-      const currentResult = processImageData(sourceData, adjustments, null)
+      const currentResult = processImageData(sourceData, visibleAdjustments, null)
       const resultDataUrl = imageDataToDataUrl(currentResult)
       const sourceDataUrl = imageToDataUrl(source.element, config.maxImageSide)
       const referenceDataUrl = imageToDataUrl(reference.element, config.maxImageSide)
@@ -598,6 +607,7 @@ function App() {
 
   const reset = () => {
     setAdjustments(createDefaultAdjustments())
+    setFineTuneVisibility({})
     setModelStyle('')
     setMatchRenderMode('none')
     notify('参数已重置')
@@ -605,6 +615,7 @@ function App() {
 
   const clearImage = (kind: ImageKind) => {
     setAdjustments(createDefaultAdjustments())
+    setFineTuneVisibility({})
     if (kind === 'source') {
       if (source) URL.revokeObjectURL(source.url)
       setSource(null); setSourceData(null); setSourceStats(null)
@@ -621,7 +632,7 @@ function App() {
     setExporting(true)
     try {
       // Full native resolution via GPU (CPU fallback). No 2400px preview-style cap.
-      const result = await exportGradedImage(source.element, adjustments, {
+      const result = await exportGradedImage(source.element, visibleAdjustments, {
         profile: activeMatchProfile,
         quality: 0.92,
       })
@@ -1184,7 +1195,12 @@ function App() {
             {panel === 'adjust' ? (
               <div className="panel-content">
                 <div className="preset-strip"><div><span>当前样式</span><strong>{currentStyleLabel}</strong></div><button onClick={reset}><RotateCcw size={14}/></button></div>
-                <FineTunePanels adjustments={adjustments} setAdjustments={setAdjustments} />
+                <FineTunePanels
+                  adjustments={adjustments}
+                  setAdjustments={setAdjustments}
+                  moduleVisibility={fineTuneVisibility}
+                  setModuleVisibility={setFineTuneVisibility}
+                />
 
               </div>
             ) : null}

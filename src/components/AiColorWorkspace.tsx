@@ -1,5 +1,5 @@
 ﻿import {
-  Check, CloudUpload, FileUp, ImageIcon, LoaderCircle, LockKeyhole,
+  Check, CloudUpload, FileUp, ImageIcon, LoaderCircle, LockKeyhole, Save, X,
   MonitorCog, RotateCcw, Send, SlidersHorizontal, Sparkles, WandSparkles,
 } from 'lucide-react'
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
@@ -14,11 +14,12 @@ import { processImageData } from '../lib/colorEngine'
 import { exportGradedImage } from '../lib/exportImage'
 import { parseCubeLut, validateCubeFile, type CubeLut3D } from '../lib/cubeLut'
 import { createDefaultAdjustments } from '../lib/defaults'
+import { applyFineTuneModuleVisibility, type FineTuneModuleVisibility } from '../lib/fineTuneVisibility'
 import { GpuPreviewRenderer } from '../lib/gpuPreview'
-import { parseLightroomXmp, validateXmpFile, type LightroomXmpPreset } from '../lib/lightroomXmp'
+import { parseLightroomXmp, serializeLightroomXmp, sanitizeXmpPresetName, validateXmpFile, type LightroomXmpPreset } from '../lib/lightroomXmp'
 import { AssetLibraryPanel } from './AssetLibraryPanel'
 import {
-  generateColoredImage, optimizeColorPrompt, readLibraryAssetText, saveJpegNative, suggestColorWorkflows,
+  generateColoredImage, importLibraryAssetBytes, optimizeColorPrompt, readLibraryAssetText, saveJpegNative, suggestColorWorkflows,
   type LibraryAsset,
 } from '../lib/desktop'
 import {
@@ -85,8 +86,14 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
   const [cubeLut, setCubeLut] = useState<CubeLut3D | null>(null)
   const [activeXmpPath, setActiveXmpPath] = useState<string | null>(null)
   const [activeCubePath, setActiveCubePath] = useState<string | null>(null)
+  const [xmpAssets, setXmpAssets] = useState<LibraryAsset[]>([])
+  const [savePresetOpen, setSavePresetOpen] = useState(false)
+  const [savePresetName, setSavePresetName] = useState('')
+  const [savePresetFolder, setSavePresetFolder] = useState('')
+  const [savingPreset, setSavingPreset] = useState(false)
   const [intensity, setIntensity] = useState(100)
   const [fineTuneAdjustments, setFineTuneAdjustments] = useState<Adjustments>(createDefaultAdjustments)
+  const [fineTuneVisibility, setFineTuneVisibility] = useState<FineTuneModuleVisibility>({})
   const [compare, setCompare] = useState(50)
   const [compareMode, setCompareMode] = useState<CompareMode>('wipe')
   const [analysisBusy, setAnalysisBusy] = useState(false)
@@ -131,6 +138,14 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
         : fineTuneAdjustments,
     [fineTuneAdjustments, importedPreset, intensity, selected],
   )
+  const visibleFineTuneAdjustments = useMemo(
+    () => applyFineTuneModuleVisibility(fineTuneAdjustments, fineTuneVisibility),
+    [fineTuneAdjustments, fineTuneVisibility],
+  )
+  const visibleLocalAdjustments = useMemo(
+    () => applyFineTuneModuleVisibility(effectiveLocalAdjustments, fineTuneVisibility),
+    [effectiveLocalAdjustments, fineTuneVisibility],
+  )
 
   const gradeFrameSize = useElementSize(gradePreviewFrameRef, Boolean(source))
   const [stableGradeFrame, setStableGradeFrame] = useState(gradeFrameSize)
@@ -164,6 +179,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
     setSelectedId('')
     setRevisedPrompt('')
     setFineTuneAdjustments(importedPreset?.adjustments || createDefaultAdjustments())
+    setFineTuneVisibility({})
     setGeneratedSourceData(null)
     if (generatedRef.current) URL.revokeObjectURL(generatedRef.current.url)
     setGeneratedImage(null)
@@ -182,8 +198,65 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
     }
   }, [importedPreset, method, sourceData])
 
+  const saveAdjustments = useMemo(() => outputKind === 'generated' ? fineTuneAdjustments : effectiveLocalAdjustments, [effectiveLocalAdjustments, fineTuneAdjustments, outputKind])
+  const saveSourceLabel = outputKind === 'generated'
+    ? '\u0041\u0049 \u8c03\u8272\u914d\u65b9\u751f\u6210\u540e\u7684\u7cbe\u7ec6\u8c03\u6574'
+    : importedPreset
+      ? '\u5f53\u524d XMP \u9884\u8bbe\u7684\u7cbe\u7ec6\u8c03\u6574'
+      : activeRecipe
+        ? '\u0041\u0049 \u8c03\u8272\u914d\u65b9\u4e0e\u7cbe\u7ec6\u8c03\u6574'
+        : '\u7cbe\u7ec6\u8c03\u6574'
+  const saveParameterGroups = useMemo(() => [
+    { title: '\u57fa\u7840\u8c03\u8272', values: [
+      ['\u66dd\u5149', saveAdjustments.exposure], ['\u5bf9\u6bd4\u5ea6', saveAdjustments.contrast], ['\u9ad8\u5149', saveAdjustments.highlights],
+      ['\u9634\u5f71', saveAdjustments.shadows], ['\u767d\u8272', saveAdjustments.whites], ['\u9ed1\u8272', saveAdjustments.blacks],
+      ['\u8272\u6e29', saveAdjustments.temperature], ['\u8272\u8c03', saveAdjustments.tint], ['\u81ea\u7136\u9971\u548c\u5ea6', saveAdjustments.vibrance], ['\u9971\u548c\u5ea6', saveAdjustments.saturation],
+    ] },
+    { title: '\u7ec6\u8282\u4e0e\u8d28\u611f', values: [
+      ['\u7eb9\u7406', saveAdjustments.texture], ['\u6e05\u6670\u5ea6', saveAdjustments.clarity], ['\u53bb\u673a\u80e7', saveAdjustments.dehaze],
+      ['\u9510\u5316', saveAdjustments.sharpen], ['\u660e\u4eae\u5ea6\u964d\u566a', saveAdjustments.luminanceNoiseReduction], ['\u989c\u8272\u964d\u566a', saveAdjustments.colorNoiseReduction],
+      ['\u6697\u89d2', saveAdjustments.vignette], ['\u892a\u8272', saveAdjustments.fade], ['\u9897\u7c92', saveAdjustments.grain],
+    ] },
+  ] as Array<{ title: string; values: Array<[string, number]> }>, [saveAdjustments])
+  const xmpFolders = useMemo(() => {
+    const folders = new Set<string>([''])
+    for (const asset of xmpAssets) {
+      if (!asset.folder) continue
+      const parts = asset.folder.split('/')
+      for (let index = 1; index <= parts.length; index += 1) folders.add(parts.slice(0, index).join('/'))
+    }
+    return [...folders].sort((left, right) => left.localeCompare(right, 'zh'))
+  }, [xmpAssets])
+
+  const openSavePreset = () => {
+    if (!sourceData && !hasPreviewResult) return notify('\u8bf7\u5148\u8f7d\u5165\u7167\u7247\u5e76\u5b8c\u6210\u8c03\u8272', 'error')
+    const fallbackName = outputKind === 'generated' ? '\u0041\u0049 \u8c03\u8272\u914d\u65b9' : importedPreset?.name ? `${importedPreset.name} \u7cbe\u4fee` : activeRecipe?.title || '\u7cbe\u7ec6\u8c03\u6574\u9884\u8bbe'
+    setSavePresetName(fallbackName)
+    setSavePresetFolder(activeXmpPath?.includes('/') ? activeXmpPath.slice(0, activeXmpPath.lastIndexOf('/')) : '')
+    setSavePresetOpen(true)
+  }
+
+  const savePreset = async () => {
+    const name = sanitizeXmpPresetName(savePresetName)
+    if (!savePresetName.trim()) return notify('\u8bf7\u8f93\u5165\u9884\u8bbe\u540d\u79f0', 'error')
+    setSavingPreset(true)
+    try {
+      const text = serializeLightroomXmp(saveAdjustments, name)
+      const relativePath = savePresetFolder ? `${savePresetFolder}/${name}.xmp` : `${name}.xmp`
+      const asset = await importLibraryAssetBytes('xmp', relativePath, text)
+      setSavePresetOpen(false)
+      setActiveXmpPath(asset.relativePath)
+      setXmpAssets((current) => [...current.filter((item) => item.relativePath !== asset.relativePath), asset])
+      notify(`\u5df2\u4fdd\u5b58\u65b0\u9884\u8bbe\u201c${asset.name}\u201d`)
+    } catch (error) {
+      notify(errorMessage(error, '\u4fdd\u5b58\u9884\u8bbe\u5931\u8d25'), 'error')
+    } finally {
+      setSavingPreset(false)
+    }
+  }
+
   const renderSource = outputKind === 'generated' ? generatedPreviewData : gradePreviewData
-  const renderAdjustments = outputKind === 'generated' ? fineTuneAdjustments : effectiveLocalAdjustments
+  const renderAdjustments = outputKind === 'generated' ? visibleFineTuneAdjustments : visibleLocalAdjustments
   // Local parameter path always previews once a photo is loaded, even without a recipe.
   const hasPreviewResult = Boolean(renderSource) && (
     outputKind === 'generated'
@@ -348,6 +421,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
     setSelectedId('')
     setMethod('local-parameters')
     setFineTuneAdjustments(preset.adjustments)
+    setFineTuneVisibility({})
     setOutputKind(sourceData ? 'local' : 'none')
     setGeneratedSourceData(null)
     setRevisedPrompt('')
@@ -391,6 +465,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
     setImportedPreset(null)
     setActiveXmpPath(null)
     setFineTuneAdjustments(createDefaultAdjustments())
+    setFineTuneVisibility({})
     if (sourceData && method === 'local-parameters') setOutputKind('local')
     notify('已清除 XMP 预设')
   }
@@ -434,6 +509,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
       ...createDefaultAdjustments(),
       lutAmount: current.lutAmount,
     }))
+    setFineTuneVisibility({})
     if (next === 'local-parameters' && sourceData) {
       setOutputKind('local')
       return
@@ -447,6 +523,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
     setSelectedId(workflow.id)
     // Selecting an AI recipe overwrites the current manual baseline (fine-tune starts from zero deltas).
     setFineTuneAdjustments(createDefaultAdjustments())
+    setFineTuneVisibility({})
     setRevisedPrompt('')
     if (method === 'local-parameters' && sourceData) {
       setOutputKind('local')
@@ -472,6 +549,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
       setGeneratedImage(loaded)
       setGeneratedSourceData(imageToImageData(loaded.element, 1800))
       setFineTuneAdjustments(createDefaultAdjustments())
+      setFineTuneVisibility({})
       setRevisedPrompt(result.revisedPrompt || '')
       setOutputKind('generated')
       setCompare(50)
@@ -496,7 +574,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
       const exportSource = outputKind === 'generated' && generatedImage
         ? generatedImage.element
         : source.element
-      const exportAdjustments = outputKind === 'generated' ? fineTuneAdjustments : effectiveLocalAdjustments
+      const exportAdjustments = outputKind === 'generated' ? visibleFineTuneAdjustments : visibleLocalAdjustments
       // Full native resolution; GPU first (Lightroom-like), CPU fallback. No 3000px cap.
       const result = await exportGradedImage(exportSource, exportAdjustments, {
         cubeLut,
@@ -539,6 +617,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
     : '分析照片并生成调色方案'
 
   return (
+    <>
     <main className="workspace-layout ai-grade-workspace">
       <aside className="workspace-rail workspace-rail--left grade-steps left-console">
         <header className="left-console__head">
@@ -602,6 +681,8 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
               emptyHint="点击 + 导入预设"
               activeRelativePath={activeXmpPath}
               onNotify={notify}
+              onSavePreset={openSavePreset}
+              onAssetsChange={setXmpAssets}
               onApply={applyLibraryXmp}
               onAssetPathChange={(from, to) => {
                 if (!activeXmpPath) return
@@ -716,6 +797,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
               title="重置当前预览"
               onClick={() => {
                 setFineTuneAdjustments(importedPreset?.adjustments || createDefaultAdjustments())
+                setFineTuneVisibility({})
                 setSelectedId('')
                 setImportedPreset(null)
                 setOutputKind(method === 'local-parameters' && sourceData ? 'local' : 'none')
@@ -863,7 +945,7 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
 
               {importedPreset ? (
                 <div className="recipe-list">
-                  <button className="recipe-card recipe-card--xmp is-active" onClick={() => { setFineTuneAdjustments(importedPreset.adjustments); if (sourceData) setOutputKind('local') }}>
+                  <button className="recipe-card recipe-card--xmp is-active" onClick={() => { setFineTuneAdjustments(importedPreset.adjustments); setFineTuneVisibility({}); if (sourceData) setOutputKind('local') }}>
                     <span className="recipe-card__index">XMP</span>
                     <span className="recipe-card__body"><strong>{importedPreset.name}</strong><small>{importedPreset.mappedFields.length} 类参数已映射 · 点击重新应用</small></span>
                     <span className="recipe-card__check"><Check size={13}/></span>
@@ -1015,7 +1097,10 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
                 <button
                   type="button"
                   title="重置精细调整"
-                  onClick={() => setFineTuneAdjustments(importedPreset?.adjustments || createDefaultAdjustments())}
+                  onClick={() => {
+                    setFineTuneAdjustments(importedPreset?.adjustments || createDefaultAdjustments())
+                    setFineTuneVisibility({})
+                  }}
                 >
                   <RotateCcw size={14}/>
                 </button>
@@ -1033,6 +1118,8 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
               </div>
               <FineTunePanels
                 adjustments={fineTuneAdjustments}
+                moduleVisibility={fineTuneVisibility}
+                setModuleVisibility={setFineTuneVisibility}
                 setAdjustments={(value) => {
                   setFineTuneAdjustments(value)
                   if (sourceData && method === 'local-parameters') {
@@ -1064,7 +1151,24 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
         </div>
       </aside>
     </main>
+    {savePresetOpen ? (
+      <div className="preset-save-dialog__backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !savingPreset) setSavePresetOpen(false) }}>
+        <section className="preset-save-dialog" role="dialog" aria-modal="true" aria-labelledby="preset-save-title">
+          <div className="preset-save-dialog__head">
+            <div><span>{'\u0041\u0049 \u8c03\u8272'}</span><h2 id="preset-save-title">{'\u4fdd\u5b58\u4e3a\u65b0\u9884\u8bbe'}</h2></div>
+            <button type="button" className="icon-button" title={'\u5173\u95ed'} aria-label={'\u5173\u95ed'} disabled={savingPreset} onClick={() => setSavePresetOpen(false)}><X size={16}/></button>
+          </div>
+          <div className="preset-save-dialog__body">
+            <label className="preset-save-dialog__field"><span>{'\u9884\u8bbe\u540d\u79f0'}</span><input autoFocus value={savePresetName} maxLength={80} onChange={(event) => setSavePresetName(event.target.value)} /></label>
+            <label className="preset-save-dialog__field"><span>{'\u4fdd\u5b58\u4f4d\u7f6e'}</span><select value={savePresetFolder} onChange={(event) => setSavePresetFolder(event.target.value)}>{xmpFolders.map((folder) => <option key={folder} value={folder}>{folder || '\u0058\u004d\u0050 \u9884\u8bbe\u5e93\u6839\u76ee\u5f55'}</option>)}</select></label>
+            <div className="preset-save-dialog__source"><span>{'\u53c2\u6570\u6765\u6e90'}</span><strong>{saveSourceLabel}</strong></div>
+            <div className="preset-save-dialog__parameters"><div className="preset-save-dialog__section-title">{'\u9884\u8bbe\u53c2\u6570'}</div>{saveParameterGroups.map((group) => <div className="preset-save-dialog__group" key={group.title}><span>{group.title}</span><div>{group.values.map(([label, value]) => <small key={label}><b>{label}</b><em>{value}</em></small>)}</div></div>)}</div>
+            <p className="preset-save-dialog__hint">{'\u4fdd\u5b58\u4e3a XMP \u540e\u53ef\u5728\u672c\u5e94\u7528\u548c Lightroom \u4e2d\u7ee7\u7eed\u4f7f\u7528\u3002'}</p>
+          </div>
+          <div className="preset-save-dialog__actions"><button type="button" className="button" disabled={savingPreset} onClick={() => setSavePresetOpen(false)}>{'\u53d6\u6d88'}</button><button type="button" className="button button--accent" disabled={savingPreset || !savePresetName.trim()} onClick={() => void savePreset()}>{savingPreset ? <LoaderCircle className="spin" size={15}/> : <Save size={15}/>} {'\u4fdd\u5b58'}</button></div>
+        </section>
+      </div>
+    ) : null}
+    </>
   )
 })
-
-

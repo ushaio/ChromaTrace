@@ -232,6 +232,18 @@ describe('advanced fine-tune stages', () => {
     expect(sampleAdjustmentCurve(0.125, [0.08, 0.32, 0.5, 0.75, 0.96])).toBeGreaterThan(0.125)
   })
 
+  it('applies a lifted master curve in encoded RGB space', () => {
+    const lifted = createDefaultAdjustments()
+    lifted.skinProtect = 0
+    lifted.curves.master = [0.08, 0.31, 0.54, 0.78, 1]
+
+    const result = transformRgb([0, 0, 0], lifted)
+
+    expect(result[0]).toBeCloseTo(0.08, 3)
+    expect(result[1]).toBeCloseTo(0.08, 3)
+    expect(result[2]).toBeCloseTo(0.08, 3)
+  })
+
   it('applies a master lift and an independent red-channel curve', () => {
     const masterLift = createDefaultAdjustments()
     masterLift.curves.master = [0.08, 0.31, 0.54, 0.78, 1]
@@ -329,7 +341,7 @@ describe('detail and optics-style adjustments', () => {
     const checkerPixels: Pixel[] = []
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
-        const checker = ((x + y) % 2) * 180 + 40
+        const checker = ((x + y) % 2) * 35 + 120
         checkerPixels.push([checker, checker, checker, 255])
       }
     }
@@ -341,5 +353,28 @@ describe('detail and optics-style adjustments', () => {
     detail.sharpen = 60
     const detailed = processImageData(checker, detail)
     expect([...detailed.data]).not.toEqual([...checker.data])
+  })
+
+  it('keeps strong noise reduction from bleeding highlights across a hard edge', () => {
+    const width = 15
+    const height = 5
+    const pixels: Pixel[] = []
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const value = x < 7 ? 30 : 245
+        pixels.push([value, value, value, 255])
+      }
+    }
+    const adjustments = createDefaultAdjustments()
+    adjustments.skinProtect = 0
+    adjustments.luminanceNoiseReduction = 100
+    adjustments.colorNoiseReduction = 100
+
+    const reduced = processImageData(imageData(width, height, pixels), adjustments)
+    const darkEdge = (2 * width + 6) * 4
+    const brightEdge = (2 * width + 7) * 4
+
+    expect(reduced.data[darkEdge]).toBeLessThan(45)
+    expect(reduced.data[brightEdge]).toBeGreaterThan(230)
   })
 })

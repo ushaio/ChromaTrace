@@ -24,8 +24,7 @@ fn entry(provider_id: &str) -> Result<Entry, String> {
 }
 
 fn legacy_entry() -> Result<Entry, String> {
-    Entry::new(SERVICE, LEGACY_USER)
-        .map_err(|error| format!("无法访问系统凭据存储：{error}"))
+    Entry::new(SERVICE, LEGACY_USER).map_err(|error| format!("无法访问系统凭据存储：{error}"))
 }
 
 #[tauri::command]

@@ -1,4 +1,5 @@
-﻿import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { configDir, dirname, join, pictureDir } from '@tauri-apps/api/path'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { load } from '@tauri-apps/plugin-store'
@@ -174,6 +175,81 @@ export async function pickCubeLutPath() {
     // ignore
   }
   return selected
+}
+
+export interface LibraryLocation {
+  path: string
+  isCustom: boolean
+}
+
+export interface LibraryMigrationProgress {
+  migrationId: string
+  phase: 'scanning' | 'copying' | 'finalizing' | 'completed'
+  copiedBytes: number
+  totalBytes: number
+  copiedFiles: number
+  totalFiles: number
+  percent: number
+  currentFile: string | null
+}
+
+export interface LibraryMigrationResult {
+  path: string
+  copiedBytes: number
+  copiedFiles: number
+  cleanupWarning: string | null
+}
+
+export async function getLibraryLocation(): Promise<LibraryLocation | null> {
+  if (!isTauri()) return null
+  return invoke<LibraryLocation>('get_library_location')
+}
+
+export async function openLibraryFolder() {
+  if (!isTauri()) throw new Error('仅桌面客户端支持打开资料库文件夹')
+  await invoke('open_library_folder')
+}
+
+export async function pickLibraryLocation(defaultPath?: string) {
+  if (!isTauri()) return null
+  const options = {
+    multiple: false as const,
+    directory: true as const,
+    recursive: true as const,
+    title: '选择新的资料库位置（须为空文件夹）',
+  }
+  let selected: string | string[] | null
+  try {
+    selected = await open(defaultPath ? { ...options, defaultPath } : options)
+  } catch (error) {
+    if (!defaultPath) throw error
+    selected = await open(options)
+  }
+  return typeof selected === 'string'
+    ? selected
+    : Array.isArray(selected) && typeof selected[0] === 'string'
+      ? selected[0]
+      : null
+}
+
+export async function migrateLibraryLocation(
+  destinationPath: string,
+  migrationId: string,
+  onProgress: (progress: LibraryMigrationProgress) => void,
+): Promise<LibraryMigrationResult> {
+  if (!isTauri()) throw new Error('仅桌面客户端支持迁移资料库')
+  let unlisten: UnlistenFn | undefined
+  try {
+    unlisten = await listen<LibraryMigrationProgress>('library-migration-progress', ({ payload }) => {
+      if (payload.migrationId === migrationId) onProgress(payload)
+    })
+    return await invoke<LibraryMigrationResult>('migrate_library_location', {
+      destinationPath,
+      migrationId,
+    })
+  } finally {
+    unlisten?.()
+  }
 }
 
 export type LibraryAssetKind = 'xmp' | 'cube'

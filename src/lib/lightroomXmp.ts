@@ -13,7 +13,7 @@ export interface LightroomXmpPreset {
 }
 
 const XMP_MAX_BYTES = 2 * 1024 * 1024
-const CURVE_SAMPLE_X = [0, 0.25, 0.5, 0.75, 1]
+const CURVE_SAMPLE_X = Array.from({ length: 17 }, (_, index) => index / 16)
 
 /** Geometric / optics transforms still outside the pixel grading engine. */
 const IMPACTFUL_UNSUPPORTED_FIELDS: Record<string, string> = {
@@ -137,6 +137,24 @@ function parseCurve(xml: string, localName: string) {
   })
 }
 
+function applyParametricCurve(base: number[], amounts: readonly number[]) {
+  const centers = [0.16, 0.36, 0.64, 0.84]
+  const widths = [0.2, 0.22, 0.22, 0.2]
+  return CURVE_SAMPLE_X.map((x) => {
+    const position = x * (base.length - 1)
+    const lower = Math.floor(position)
+    const upper = Math.min(base.length - 1, lower + 1)
+    const value = base[lower] + (base[upper] - base[lower]) * (position - lower)
+    const endpointProtection = 4 * x * (1 - x)
+    const shift = amounts.reduce((sum, amount, zone) => {
+      const distance = (x - centers[zone]) / widths[zone]
+      const weight = Math.exp(-0.5 * distance * distance)
+      return sum + clamp(amount, -100, 100) / 100 * 0.16 * weight * endpointProtection
+    }, 0)
+    return clamp(value + shift, 0, 1)
+  })
+}
+
 function collectCrsFields(xml: string) {
   const fields = new Set<string>()
   const pattern = /\bcrs:([A-Za-z_][\w.-]*)\b/g
@@ -146,6 +164,118 @@ function collectCrsFields(xml: string) {
 
 function unique(values: string[]) {
   return [...new Set(values)]
+}
+
+function encodeXml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+}
+
+function xmpNumber(value: number) {
+  if (!Number.isFinite(value)) return '0'
+  return Number(value.toFixed(4)).toString()
+}
+
+export function sanitizeXmpPresetName(name: string) {
+  return name
+    .trim()
+    .replace(/[<>:"|?*\\/\u0000-\u001f]/g, '_')
+    .replace(/^\.+|\.+$/g, '')
+    .trim() || '\u65b0\u9884\u8bbe'
+}
+
+export function serializeLightroomXmp(adjustments: Adjustments, name: string) {
+  const presetName = sanitizeXmpPresetName(name)
+  const attributes: Array<[string, number | string]> = [
+    ['crs:Name', presetName],
+    ['crs:PresetType', 'Normal'],
+    ['crs:ProcessVersion', '15.4'],
+    ['crs:HasSettings', 'True'],
+    ['crs:Exposure2012', adjustments.exposure],
+    ['crs:Contrast2012', adjustments.contrast],
+    ['crs:Highlights2012', adjustments.highlights],
+    ['crs:Shadows2012', adjustments.shadows],
+    ['crs:Whites2012', adjustments.whites],
+    ['crs:Blacks2012', adjustments.blacks],
+    ['crs:IncrementalTemperature', adjustments.temperature],
+    ['crs:IncrementalTint', adjustments.tint],
+    ['crs:Vibrance', adjustments.vibrance],
+    ['crs:Saturation', adjustments.saturation],
+    ['crs:Texture', adjustments.texture],
+    ['crs:Clarity2012', adjustments.clarity],
+    ['crs:Dehaze', adjustments.dehaze],
+    ['crs:SharpenAmount', adjustments.sharpen],
+    ['crs:SharpenRadius', adjustments.sharpenRadius],
+    ['crs:SharpenDetail', adjustments.sharpenDetail],
+    ['crs:SharpenEdgeMasking', adjustments.sharpenMasking],
+    ['crs:LuminanceSmoothing', adjustments.luminanceNoiseReduction],
+    ['crs:ColorNoiseReduction', adjustments.colorNoiseReduction],
+    ['crs:PostCropVignetteAmount', adjustments.vignette],
+    ['crs:PostCropVignetteMidpoint', adjustments.vignetteMidpoint],
+    ['crs:PostCropVignetteFeather', adjustments.vignetteFeather],
+    ['crs:GrainAmount', adjustments.grain],
+    ['ct:Fade', adjustments.fade],
+  ]
+
+  for (const [channel, suffix] of HSL_CHANNELS) {
+    attributes.push(
+      [`crs:HueAdjustment${suffix}`, adjustments.hsl[channel].hue],
+      [`crs:SaturationAdjustment${suffix}`, adjustments.hsl[channel].saturation],
+      [`crs:LuminanceAdjustment${suffix}`, adjustments.hsl[channel].luminance],
+    )
+  }
+
+  const gradeZones = [
+    ['shadows', 'Shadow'],
+    ['midtones', 'Midtone'],
+    ['highlights', 'Highlight'],
+  ] as const
+  for (const [zone, suffix] of gradeZones) {
+    attributes.push(
+      [`crs:ColorGrade${suffix}Hue`, adjustments.colorGrading[zone].hue],
+      [`crs:ColorGrade${suffix}Sat`, adjustments.colorGrading[zone].saturation],
+      [`crs:ColorGrade${suffix}Lum`, adjustments.colorGrading[zone].luminance],
+    )
+  }
+  attributes.push(
+    ['crs:ColorGradeBalance', adjustments.colorGrading.balance],
+    ['crs:ColorGradeBlending', adjustments.colorGrading.blending],
+    ['crs:RedPrimaryHue', adjustments.calibration.redHue],
+    ['crs:RedPrimarySaturation', adjustments.calibration.redSaturation],
+    ['crs:GreenPrimaryHue', adjustments.calibration.greenHue],
+    ['crs:GreenPrimarySaturation', adjustments.calibration.greenSaturation],
+    ['crs:BluePrimaryHue', adjustments.calibration.blueHue],
+    ['crs:BluePrimarySaturation', adjustments.calibration.blueSaturation],
+  )
+
+  const attributeText = attributes
+    .map(([key, value]) => `      ${key}="${encodeXml(typeof value === 'number' ? xmpNumber(value) : value)}"`)
+    .join('\n')
+  const curves = CURVE_CHANNELS.map(([channel, key]) => {
+    const points = adjustments.curves[channel].map((value, index) => {
+      const x = Math.round(index / Math.max(1, adjustments.curves[channel].length - 1) * 255)
+      const y = Math.round(clamp(value, 0, 1) * 255)
+      return `          <rdf:li>${x}, ${y}</rdf:li>`
+    }).join('\n')
+    return `      <crs:${key}>\n        <rdf:Seq>\n${points}\n        </rdf:Seq>\n      </crs:${key}>`
+  }).join('\n')
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description
+      xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+      xmlns:ct="https://chroma-trace.local/xmp/1.0/"
+${attributeText}>
+${curves}
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>
+`
 }
 
 export function validateXmpFile(file: Pick<File, 'name' | 'size'>) {
@@ -161,6 +291,9 @@ export function parseLightroomXmp(xml: string, fileName = 'Lightroom preset.xmp'
 
   const attributes = collectAttributes(xml)
   const adjustments = createDefaultAdjustments()
+  // Lightroom presets do not implicitly protect skin. The application default is
+  // intended for AI recipes and would otherwise weaken selective color controls.
+  adjustments.skinProtect = 0
   const mappedFields: string[] = []
   const warnings: string[] = []
 
@@ -209,6 +342,13 @@ export function parseLightroomXmp(xml: string, fileName = 'Lightroom preset.xmp'
   mapNumeric('tint', '色调', -100, 100, 'IncrementalTint', 'Tint')
   mapNumeric('vibrance', '自然饱和度', -100, 100, 'Vibrance')
   mapNumeric('saturation', '饱和度', -100, 100, 'Saturation')
+  mapNumeric('fade', '褪色', 0, 100, 'Fade')
+  const convertToGrayscale = fieldValue(xml, attributes, 'ConvertToGrayscale')
+  if (convertToGrayscale && /^(true|1)$/i.test(convertToGrayscale)) {
+    adjustments.vibrance = 0
+    adjustments.saturation = -100
+    mappedFields.push('黑白')
+  }
   mapNumeric('grain', '颗粒', 0, 100, 'GrainAmount')
   mapNumeric('texture', '纹理', -100, 100, 'Texture')
   mapNumeric('clarity', '清晰度', -100, 100, 'Clarity2012', 'Clarity')
@@ -247,6 +387,17 @@ export function parseLightroomXmp(xml: string, fileName = 'Lightroom preset.xmp'
     if (!curve) continue
     adjustments.curves[channel] = curve
     mappedFields.push(label)
+  }
+
+  const parametricCurve = [
+    numericField(xml, attributes, 'ParametricShadows') ?? 0,
+    numericField(xml, attributes, 'ParametricDarks') ?? 0,
+    numericField(xml, attributes, 'ParametricLights') ?? 0,
+    numericField(xml, attributes, 'ParametricHighlights') ?? 0,
+  ]
+  if (parametricCurve.some((value) => value !== 0)) {
+    adjustments.curves.master = applyParametricCurve(adjustments.curves.master, parametricCurve)
+    mappedFields.push('参数曲线')
   }
 
   const gradeZones = [

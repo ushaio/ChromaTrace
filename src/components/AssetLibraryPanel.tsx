@@ -1,6 +1,6 @@
 import {
   Check, ChevronDown, ChevronRight, FilePlus2, FileUp, Folder, FolderInput,
-  GripVertical, Import, LoaderCircle, Pencil, Trash2,
+  GripVertical, Import, LoaderCircle, Pencil, Save, Search, Trash2, X,
 } from 'lucide-react'
 import {
   useCallback, useEffect, useMemo, useRef, useState,
@@ -33,6 +33,17 @@ function formatBytes(size: number) {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
+export function filterLibraryAssets(assets: LibraryAsset[], query: string) {
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  if (!normalizedQuery) return assets
+  return assets.filter((asset) => [
+    asset.name,
+    asset.fileName,
+    asset.relativePath,
+    asset.folder,
+  ].some((value) => value.toLocaleLowerCase().includes(normalizedQuery)))
 }
 
 interface FolderNode {
@@ -227,6 +238,10 @@ interface AssetLibraryPanelProps {
   title: string
   emptyHint: string
   activeRelativePath?: string | null
+  /** Save the current AI grading as a new XMP preset. */
+  onSavePreset?: () => void
+  /** Exposes the current list for related actions such as saving a new preset. */
+  onAssetsChange?: (assets: LibraryAsset[]) => void
   /** When omitted, row click only highlights (settings manage mode). */
   onApply?: (asset: LibraryAsset) => void | Promise<void>
   onNotify: (message: string, kind?: 'ok' | 'error') => void
@@ -249,6 +264,8 @@ export function AssetLibraryPanel({
   title,
   emptyHint,
   activeRelativePath,
+  onSavePreset,
+  onAssetsChange,
   onApply,
   onNotify,
   refreshKey = 0,
@@ -271,6 +288,8 @@ export function AssetLibraryPanel({
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   /** Entire library panel body collapsed (header stays visible). */
   const [panelCollapsed, setPanelCollapsed] = useState(!defaultExpanded)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [dropHover, setDropHover] = useState<DropHover | null>(null)
@@ -280,6 +299,8 @@ export function AssetLibraryPanel({
   const renameCommitFromButtonRef = useRef(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const menuTriggerRef = useRef<HTMLButtonElement>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const searchDebounceRef = useRef<number | null>(null)
   const treeRootRef = useRef<HTMLDivElement>(null)
   const orderRef = useRef(order)
   const busyIdRef = useRef(busyId)
@@ -297,6 +318,7 @@ export function AssetLibraryPanel({
         loadLibraryOrder(kind),
       ])
       setAssets(nextAssets)
+      onAssetsChange?.(nextAssets)
       setOrder(nextOrder)
     } catch (error) {
       onNotifyRef.current(errorMessage(error, '加载资料库失败'), 'error')
@@ -308,6 +330,14 @@ export function AssetLibraryPanel({
   useEffect(() => {
     void reload()
   }, [reload, refreshKey])
+
+  useEffect(() => {
+    if (searchOpen && !panelCollapsed) searchInputRef.current?.focus()
+  }, [panelCollapsed, searchOpen])
+
+  useEffect(() => () => {
+    if (searchDebounceRef.current !== null) window.clearTimeout(searchDebounceRef.current)
+  }, [])
 
   useEffect(() => {
     if (!menuOpen) {
@@ -354,6 +384,10 @@ export function AssetLibraryPanel({
   }, [menuOpen])
 
   const tree = useMemo(() => buildFolderTree(assets, order), [assets, order])
+  const filteredAssets = useMemo(() => filterLibraryAssets(assets, searchQuery), [assets, searchQuery])
+  const visibleTree = useMemo(() => buildFolderTree(filteredAssets, order), [filteredAssets, order])
+  const isSearching = Boolean(searchQuery.trim())
+  const dragReorderEnabled = enableDragReorder && !isSearching
   const treeRef = useRef(tree)
   treeRef.current = tree
   const label = kind === 'xmp' ? 'XMP' : 'CUBE'
@@ -992,15 +1026,15 @@ export function AssetLibraryPanel({
   )
 
   const renderFolder = (folderPath: string): ReactNode => {
-    const node = tree.nodes.get(folderPath)
+    const node = visibleTree.nodes.get(folderPath)
     if (!node) return null
     const isRoot = folderPath === ''
-    const isCollapsed = isFolderCollapsed(folderPath, node.depth)
+    const isCollapsed = isSearching ? false : isFolderCollapsed(folderPath, node.depth)
     const folderBusy = busyId.includes(folderPath)
-    const isFolderDragOver = enableDragReorder
+    const isFolderDragOver = dragReorderEnabled
       && dropHover?.kind === 'folder'
       && dropHover.path === folderPath
-    const canDragFolder = enableDragReorder && !busyId && editingFolder !== folderPath
+    const canDragFolder = dragReorderEnabled && !busyId && editingFolder !== folderPath
     const folderPlaceAfter = isFolderDragOver && dropHover?.kind === 'folder' ? dropHover.placeAfter : false
     const isDraggingSelf = pointerDragging
       && pointerDragRef.current?.payload.type === 'folder'
@@ -1017,7 +1051,7 @@ export function AssetLibraryPanel({
           <div
             className={[
               'asset-folder__row',
-              enableDragReorder ? 'has-grip' : '',
+              dragReorderEnabled ? 'has-grip' : '',
               isFolderDragOver ? 'is-drop-target' : '',
               isFolderDragOver && folderPlaceAfter ? 'is-drop-after' : '',
               isFolderDragOver && !folderPlaceAfter ? 'is-drop-before' : '',
@@ -1025,7 +1059,7 @@ export function AssetLibraryPanel({
             ].filter(Boolean).join(' ')}
             data-library-drop={`folder:${folderPath}`}
           >
-            {enableDragReorder ? (
+            {dragReorderEnabled ? (
               <span
                 className="asset-library__grip"
                 title="按住拖动排序 / 移动"
@@ -1064,7 +1098,7 @@ export function AssetLibraryPanel({
               ) : (
                 <span>{node.name}</span>
               )}
-              <em>{countSubtreeAssets(tree.nodes, folderPath)}</em>
+              <em>{countSubtreeAssets(visibleTree.nodes, folderPath)}</em>
             </button>
             <div className="asset-library__actions asset-folder__actions">
               <button
@@ -1109,10 +1143,10 @@ export function AssetLibraryPanel({
             {node.assets.map((asset) => {
               const active = activeRelativePath === asset.relativePath
               const rowBusy = busyId.includes(asset.id) || busyId.includes(asset.relativePath)
-              const isAssetDragOver = enableDragReorder
+              const isAssetDragOver = dragReorderEnabled
                 && dropHover?.kind === 'asset'
                 && dropHover.relativePath === asset.relativePath
-              const canDragAsset = enableDragReorder && !busyId && editingId !== asset.id
+              const canDragAsset = dragReorderEnabled && !busyId && editingId !== asset.id
               const assetPlaceAfter = isAssetDragOver && dropHover?.kind === 'asset' ? dropHover.placeAfter : false
               const isDraggingSelf = pointerDragging
                 && pointerDragRef.current?.payload.type === 'asset'
@@ -1122,7 +1156,7 @@ export function AssetLibraryPanel({
                   key={asset.id}
                   className={[
                     'asset-library__item',
-                    enableDragReorder ? 'has-grip' : '',
+                    dragReorderEnabled ? 'has-grip' : '',
                     active ? 'is-active' : '',
                     isAssetDragOver ? 'is-drop-target' : '',
                     isAssetDragOver && assetPlaceAfter ? 'is-drop-after' : '',
@@ -1131,7 +1165,7 @@ export function AssetLibraryPanel({
                   ].filter(Boolean).join(' ')}
                   data-library-drop={`asset:${asset.relativePath}`}
                 >
-                  {enableDragReorder ? (
+                  {dragReorderEnabled ? (
                     <span
                       className="asset-library__grip"
                       title="按住拖动排序 / 移动"
@@ -1230,8 +1264,45 @@ export function AssetLibraryPanel({
     )
   }
 
+  const clearSearch = () => {
+    if (searchDebounceRef.current !== null) {
+      window.clearTimeout(searchDebounceRef.current)
+      searchDebounceRef.current = null
+    }
+    if (searchInputRef.current) searchInputRef.current.value = ''
+    setSearchQuery('')
+  }
+
+  const scheduleSearch = (value: string) => {
+    if (searchDebounceRef.current !== null) window.clearTimeout(searchDebounceRef.current)
+    if (!value.trim()) {
+      searchDebounceRef.current = null
+      setSearchQuery('')
+      return
+    }
+    searchDebounceRef.current = window.setTimeout(() => {
+      searchDebounceRef.current = null
+      setSearchQuery(value)
+    }, 120)
+  }
+
   const togglePanelCollapsed = () => {
+    if (!panelCollapsed) {
+      setSearchOpen(false)
+      clearSearch()
+    }
     setPanelCollapsed((current) => !current)
+    setMenuOpen(false)
+  }
+
+  const toggleSearch = () => {
+    if (searchOpen) {
+      setSearchOpen(false)
+      clearSearch()
+      return
+    }
+    setPanelCollapsed(false)
+    setSearchOpen(true)
     setMenuOpen(false)
   }
 
@@ -1267,7 +1338,65 @@ export function AssetLibraryPanel({
         >
           {title}
         </strong>
-        <em className="asset-library__count">{assets.length ? `${assets.length}` : '0'}</em>
+        <div
+          className={`asset-library__search-inline ${searchOpen ? 'is-open' : ''}`}
+          onBlur={(event) => {
+            if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return
+            if (!searchInputRef.current?.value.trim()) {
+              clearSearch()
+              setSearchOpen(false)
+            }
+          }}
+        >
+          <div className={'asset-library__search-surface'}>
+            <button
+              type={'button'}
+              className={`asset-library__search-toggle ${searchOpen ? 'is-active' : ''}`}
+              title={searchOpen ? '关闭搜索' : `搜索${title}中的文件和文件夹`}
+              aria-label={searchOpen ? '关闭搜索' : `搜索${title}中的文件和文件夹`}
+              aria-expanded={searchOpen}
+              onClick={toggleSearch}
+            >
+              <Search size={14} />
+            </button>
+            <input
+              ref={searchInputRef}
+              type={'search'}
+              defaultValue={String()}
+              placeholder={'搜索文件或文件夹'}
+              aria-label={`搜索${title}中的文件或文件夹`}
+              tabIndex={searchOpen ? 0 : -1}
+              onInput={(event) => scheduleSearch(event.currentTarget.value)}
+            />
+            <button
+              type={'button'}
+              className={'asset-library__search-clear'}
+              title={'清除搜索'}
+              aria-label={'清除搜索'}
+              tabIndex={searchOpen ? 0 : -1}
+              onClick={() => {
+                clearSearch()
+                searchInputRef.current?.focus()
+              }}
+            >
+              <X size={12} />
+            </button>
+          </div>
+        </div>
+        <em className={'asset-library__count'}>
+          {isSearching ? `${filteredAssets.length}/${assets.length}` : assets.length}
+        </em>
+        {kind === 'xmp' && onSavePreset ? (
+          <button
+            type="button"
+            className="icon-button asset-library__save"
+            title={'\u4fdd\u5b58\u4e3a\u65b0\u9884\u8bbe'}
+            aria-label={'\u4fdd\u5b58\u4e3a\u65b0\u9884\u8bbe'}
+            onClick={onSavePreset}
+          >
+            <Save size={14} />
+          </button>
+        ) : null}
         {importMenu}
       </div>
 
@@ -1279,6 +1408,10 @@ export function AssetLibraryPanel({
         ) : assets.length === 0 ? (
           <div className="asset-library__empty">
             <span>{emptyHint}</span>
+          </div>
+        ) : isSearching && filteredAssets.length === 0 ? (
+          <div className={'asset-library__empty'}>
+            <span>没有匹配的文件或文件夹</span>
           </div>
         ) : (
           <div

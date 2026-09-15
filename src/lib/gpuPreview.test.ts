@@ -46,10 +46,24 @@ describe('packGpuAdjustments', () => {
 
     const packed = packGpuAdjustments(adjustments)
 
-    expect([...packed.curves.slice(0, 5)]).toEqual([
-      0, expect.closeTo(0.7), expect.closeTo(0.7), 1, 1,
-    ])
-    expect([...packed.curves.slice(5, 10)]).toEqual([0, 0.25, 0.5, 0.75, 1])
+    expect(packed.curves).toHaveLength(68)
+    expect(packed.curves[0]).toBe(0)
+    expect(packed.curves[4]).toBeCloseTo(0.7)
+    expect(packed.curves[8]).toBeCloseTo(0.7)
+    expect(packed.curves[12]).toBe(1)
+    expect(packed.curves[16]).toBe(1)
+    expect([...packed.curves.slice(17, 34)]).toEqual(expect.arrayContaining([0, 0.5, 1]))
+  })
+
+  it('preserves all samples from imported 17-point curves', () => {
+    const adjustments = createDefaultAdjustments()
+    adjustments.curves.master = Array.from({ length: 17 }, (_, index) => (index / 16) ** 1.4)
+
+    const packed = packGpuAdjustments(adjustments)
+
+    expect([...packed.curves.slice(0, 17)]).toEqual(
+      adjustments.curves.master.map((value) => expect.closeTo(value)),
+    )
   })
 })
 
