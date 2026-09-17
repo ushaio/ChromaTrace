@@ -1,0 +1,8 @@
+{"file":".trellis/spec/frontend/index.md","reason":"前端工作区与组件改造必须遵守项目的简体中文文档和模块规范。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"App.tsx 的共享 source 与调整状态迁移必须符合既有状态归属和预览尺寸性能约束。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"实现后需要按现有 npm test/build 质量门禁验证。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"新增 IPC 与 manifest 类型必须沿用 strict TypeScript 和 interface/union 模式。"}
+{"file":".trellis/spec/backend/index.md","reason":"Rust/Tauri 工作区命令需要遵守后端模块边界和 IPC 约定。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"新增 Rust 命令沿用 Result<T, String> 和中文错误前缀。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Rust 变更需要运行 cargo fmt 与 cargo test，并抽取纯函数测试。"}
+{"file":"docs/WORKSPACE_V1_PLAN.md","reason":"这是本任务的确认设计、数据模型、性能陷阱和验收标准。"}

@@ -1,0 +1,7 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"检查前端构建、测试和组件质量门禁。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"检查工作区状态迁移是否破坏共享 source 与预览性能约束。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"检查 TypeScript strict 类型和 IPC 手写映射的一致性。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查 Rust fmt/test 及纯函数测试覆盖。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"检查 Tauri 命令错误形态和中文错误文案。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"工作区功能跨 Rust IPC、前端状态和组件，需做跨层一致性检查。"}
+{"file":"docs/WORKSPACE_V1_PLAN.md","reason":"按原始 V1 设计与验收项检查实现完整性。"}

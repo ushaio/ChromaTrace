@@ -254,3 +254,7 @@ docs/
 - `docs/AI_COLOR_GRADING_V1_PLAN.md`
 - `docs/AI_COLOR_MATCH_ENGINE_V0_4.md`
 
+## 许可证
+
+本项目基于 [GNU General Public License v3.0](LICENSE)（GPL-3.0-only）发布。
+
