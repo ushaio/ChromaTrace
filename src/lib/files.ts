@@ -72,6 +72,17 @@ export const PREVIEW_MAX_SIDE = 4096
 /** While the preview frame has not laid out yet, use this interim longest side. */
 export const PREVIEW_FALLBACK_MAX_SIDE = 1920
 
+/**
+ * 预览框是否已经完成布局测量。
+ *
+ * 阈值与 `computeViewportPreviewSize` 内部保持一致：视口任一边 < 2px 都会被当成「还没布局」，
+ * 转而按 `PREVIEW_FALLBACK_MAX_SIDE` 回退处理。调用方据此跳过这一次回退计算——它是对原图的
+ * 同步 drawImage + getImageData，而结果随后必然被真实尺寸的结果替换，属于白冻一次主线程。
+ */
+export function isViewportMeasured(viewportCssWidth: number, viewportCssHeight: number) {
+  return viewportCssWidth >= 2 && viewportCssHeight >= 2
+}
+
 export interface ViewportPreviewOptions {
   maxSide?: number
   fallbackMaxSide?: number

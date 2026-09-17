@@ -1,7 +1,10 @@
-import { FolderCog, FolderKanban, FolderOpen, HardDrive, Import, LoaderCircle, MoveRight } from 'lucide-react'
+import { FolderCog, FolderKanban, FolderOpen, HardDrive, HardDriveDownload, Import, Link2, LoaderCircle, MoveRight, RotateCcw } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import {
+  clearVolumePolicies,
+  clearVolumePolicy,
   getLibraryLocation,
+  getVolumePolicies,
   isTauri,
   migrateLibraryLocation,
   openLibraryFolder,
@@ -9,6 +12,7 @@ import {
   type LibraryLocation,
   type LibraryMigrationProgress,
 } from '../lib/desktop'
+import type { VolumePolicyRecord } from '../lib/types'
 import { AssetLibraryPanel } from './AssetLibraryPanel'
 
 type Notify = (message: string, kind?: 'ok' | 'error') => void
@@ -53,6 +57,8 @@ export function LibrarySettingsPanel({ notify, refreshKey = 0 }: LibrarySettings
   const [progressVisible, setProgressVisible] = useState(false)
   const [progress, setProgress] = useState<LibraryMigrationProgress>(INITIAL_PROGRESS)
   const [libraryRefreshKey, setLibraryRefreshKey] = useState(refreshKey)
+  const [volumePolicies, setVolumePolicies] = useState<Array<[string, VolumePolicyRecord]>>([])
+  const [policyBusy, setPolicyBusy] = useState(false)
 
   useEffect(() => setLibraryRefreshKey(refreshKey), [refreshKey])
 
@@ -71,6 +77,46 @@ export function LibrarySettingsPanel({ notify, refreshKey = 0 }: LibrarySettings
   useEffect(() => {
     void loadLocation()
   }, [loadLocation])
+
+  const loadVolumePolicies = useCallback(async () => {
+    if (!desktop) return
+    try {
+      const policies = await getVolumePolicies()
+      setVolumePolicies(Object.entries(policies).sort((left, right) =>
+        (right[1].updatedAt ?? 0) - (left[1].updatedAt ?? 0)))
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), 'error')
+    }
+  }, [desktop, notify])
+
+  useEffect(() => {
+    void loadVolumePolicies()
+  }, [loadVolumePolicies])
+
+  const clearOneVolume = async (volumeId: string) => {
+    setPolicyBusy(true)
+    try {
+      await clearVolumePolicy(volumeId)
+      await loadVolumePolicies()
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), 'error')
+    } finally {
+      setPolicyBusy(false)
+    }
+  }
+
+  const clearAllVolumes = async () => {
+    setPolicyBusy(true)
+    try {
+      await clearVolumePolicies()
+      await loadVolumePolicies()
+      notify('已重置所有卷的复制 / 引用记忆')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), 'error')
+    } finally {
+      setPolicyBusy(false)
+    }
+  }
 
   const handleOpenFolder = async () => {
     setOpening(true)
@@ -119,17 +165,12 @@ export function LibrarySettingsPanel({ notify, refreshKey = 0 }: LibrarySettings
     <section className="settings-panel library-settings-panel">
       <header className="settings-panel__head">
         <div>
-          <span className="settings-panel__crumb">设置 / 资料库</span>
           <h2>资料库</h2>
-          <p>
-            维护预设与调色查找表。可打开存储文件夹或迁移整个资料库，也可在下方导入、重命名和整理资源。
-          </p>
         </div>
         <div className="settings-panel__pulse is-on">
           <FolderKanban size={16} />
           <span>
             <strong>本地资源</strong>
-            <small>预设与调色查找表 · 自定义位置</small>
           </span>
         </div>
       </header>
@@ -184,9 +225,69 @@ export function LibrarySettingsPanel({ notify, refreshKey = 0 }: LibrarySettings
                 </div>
               </div>
             ) : (
-              <p className="library-location-card__note">修改路径时会迁移全部相关文件并保留目录结构。为避免覆盖已有内容，目标文件夹必须为空。</p>
+              <p className="library-location-card__note">迁移会保留目录结构，目标文件夹必须为空。</p>
             )}
             </div>
+          </section>
+
+          <section className="settings-card library-volume-card">
+            <div className="settings-card__head">
+              <div>
+                <h3>卷记忆</h3>
+              </div>
+              <span className="library-settings-hint">
+                <HardDrive size={13} />
+                按卷标识记忆，与盘符无关
+              </span>
+            </div>
+
+            {volumePolicies.length === 0 ? (
+              <p className="settings-card__note">
+                还没有记住任何设备。导入时选择「复制到资料库」或「直接引用」后，会按设备记住该选择，
+                下次导入同一设备时不再询问。
+              </p>
+            ) : (
+              <ul className="volume-memory">
+                {volumePolicies.map(([volumeId, record]) => (
+                  <li key={volumeId}>
+                    <span className="volume-memory__mark" aria-hidden="true">
+                      {record.policy === 'copy' ? <HardDriveDownload size={14} /> : <Link2 size={14} />}
+                    </span>
+                    <span className="volume-memory__copy">
+                      <strong>{record.label || '未命名设备'}</strong>
+                      <em>{volumeId}</em>
+                    </span>
+                    <em className={record.policy === 'copy' ? 'is-copy' : 'is-reference'}>
+                      {record.policy === 'copy' ? '复制' : '直接引用'}
+                    </em>
+                    <button
+                      type="button"
+                      className="button button--dark button--compact"
+                      disabled={policyBusy}
+                      onClick={() => void clearOneVolume(volumeId)}
+                    >
+                      清除
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="library-location-actions">
+              <button
+                type="button"
+                className="button button--dark"
+                disabled={!desktop || policyBusy || volumePolicies.length === 0}
+                onClick={() => void clearAllVolumes()}
+              >
+                {policyBusy ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />}
+                重置所有卷的记忆
+              </button>
+            </div>
+
+            <p className="settings-card__note">
+              被记住为「直接引用」的设备不在位时，其图片会显示断链角标 —— 那时仍可在这里清除记忆，回到每次询问。
+            </p>
           </section>
 
           <section className="settings-card library-settings-card">
@@ -224,7 +325,7 @@ export function LibrarySettingsPanel({ notify, refreshKey = 0 }: LibrarySettings
             </div>
 
             <p className="settings-card__note">
-              排序与移动结果会保存在本机。调色工作区侧栏中的同名资料库会同步显示，但侧栏不提供拖动整理。
+              排序与移动结果保存在本机；调色工作区侧栏同步显示但不支持拖动整理。
             </p>
           </section>
         </div>

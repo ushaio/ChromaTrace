@@ -354,7 +354,7 @@ export function FineTunePanels({
         <div className="module-divider" />
         <Control label="褪色" value={adjustments.fade} min={0} max={100} signed={false} onChange={(value) => setNumeric('fade', value)} />
         <Control label="颗粒" value={adjustments.grain} min={0} max={100} signed={false} onChange={(value) => setNumeric('grain', value)} />
-        <p className="module__hint">导出按原图像素全分辨率处理（优先 GPU）。裁剪、镜头与透视校正仍未纳入像素引擎。</p>
+        <p className="module__hint">导出按原图像素全分辨率处理（优先 GPU）。</p>
       </CollapsibleModule>
     </>
   )

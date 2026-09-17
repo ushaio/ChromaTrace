@@ -1,7 +1,9 @@
 mod asset_library;
 mod credentials;
 mod model_client;
+mod photo_info;
 mod raw_decode;
+mod workspace;
 
 use std::fs;
 use std::path::Path;
@@ -45,6 +47,34 @@ pub fn run() {
             read_binary_file,
             write_binary_file,
             raw_decode::decode_raw_file,
+            raw_decode::decode_raw_thumbnail,
+            workspace::list_workspaces,
+            workspace::create_workspace,
+            workspace::rename_workspace,
+            workspace::delete_workspace,
+            workspace::read_workspace_manifest,
+            workspace::write_workspace_manifest,
+            workspace::classify_source_volumes,
+            workspace::resolve_volume_mount,
+            workspace::get_volume_policies,
+            workspace::set_volume_policy,
+            workspace::clear_volume_policies,
+            workspace::clear_volume_policy,
+            workspace::import_workspace_files,
+            workspace::cancel_workspace_import,
+            workspace::import_workspace_reference,
+            workspace::resolve_workspace_reference_path,
+            workspace::resolve_workspace_photo_paths,
+            workspace::list_absent_workspace_volumes,
+            workspace::read_workspace_thumbnail,
+            workspace::write_workspace_thumbnail,
+            workspace::purge_workspace_thumbnails,
+            workspace::clear_workspace,
+            workspace::workspace_disk_space,
+            workspace::open_workspace_folder,
+            photo_info::read_workspace_photo_properties,
+            photo_info::reveal_photo_location,
+            photo_info::delete_workspace_photos,
             asset_library::get_library_location,
             asset_library::open_library_folder,
             asset_library::migrate_library_location,

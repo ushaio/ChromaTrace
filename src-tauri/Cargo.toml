@@ -3,7 +3,7 @@ name = "chromatrace"
 version = "0.1.0"
 description = "Windows AI color matching studio"
 authors = ["ChromaTrace"]
-license = "Proprietary"
+license = "GPL-3.0-only"
 edition = "2021"
 rust-version = "1.77.2"
 
@@ -26,9 +26,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 base64 = "0.22"
 rawler = "0.6.0"
 image = "0.25"
+sha1 = "=0.10.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+windows = { version = "=0.61.3", features = ["Win32_Storage_FileSystem"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

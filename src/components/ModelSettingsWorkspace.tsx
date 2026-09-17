@@ -213,24 +213,18 @@ export function ModelSettingsWorkspace({
 
   const sectionMeta = tab === 'providers'
     ? {
-        eyebrow: 'PROVIDERS',
         title: '模型供应商',
-        description: '管理服务地址、API 类型与凭据。视觉与图像模型可分别引用不同供应商。',
         action: '新增供应商',
         onAdd: addProvider,
       }
     : tab === 'vision'
       ? {
-          eyebrow: 'VISION',
           title: '视觉模型',
-          description: '用于 AI 追色、画面理解、提示词优化与结构化调色配方。',
           action: '新增视觉模型',
           onAdd: addVision,
         }
       : {
-          eyebrow: 'IMAGE',
           title: '图像生成模型',
-          description: '用于图生图或 /images/generations 纯文本生图，与视觉分析模型独立。',
           action: '新增图像模型',
           onAdd: addImage,
         }
@@ -239,9 +233,7 @@ export function ModelSettingsWorkspace({
     <section className="settings-panel model-panel">
       <header className="settings-panel__head">
         <div>
-          <span className="settings-panel__crumb">设置 / 模型</span>
           <h2>模型设置</h2>
-          <p>配置供应商与路由，让 AI 追色、配方分析和图生图各自走正确的服务端点。</p>
         </div>
         <div className={`settings-panel__pulse ${settings.enabled ? 'is-on' : ''}`}>
           {settings.enabled ? <Wifi size={16}/> : <WifiOff size={16}/>}
@@ -279,7 +271,7 @@ export function ModelSettingsWorkspace({
                 onChange={(event) => onChange({ ...settings, enabled: event.target.checked })}
               />
             </label>
-            <small>关闭后保留配置，停用 AI 流程</small>
+            <small>关闭后停用 AI 流程</small>
           </article>
         </section>
 
@@ -297,9 +289,7 @@ export function ModelSettingsWorkspace({
 
         <div className="settings-section-bar">
           <div>
-            <span className="kicker">{sectionMeta.eyebrow}</span>
             <h3>{sectionMeta.title}</h3>
-            <p>{sectionMeta.description}</p>
           </div>
           <button className="button button--light" type="button" onClick={sectionMeta.onAdd}>
             <Plus size={14}/> {sectionMeta.action}
@@ -336,7 +326,6 @@ export function ModelSettingsWorkspace({
               <section className="settings-card settings-editor">
                 <div className="settings-card__head">
                   <div>
-                    <span className="kicker">PROVIDER</span>
                     <h3>{selectedProvider.name || '未命名供应商'}</h3>
                   </div>
                   <button className="icon-button icon-button--danger" type="button" title="删除供应商" onClick={() => deleteProvider(selectedProvider)}>
@@ -368,20 +357,20 @@ export function ModelSettingsWorkspace({
                     <LockKeyhole size={15}/>
                     <span>
                       <strong>API Key</strong>
-                      <small>{credentialStatus[selectedProvider.id] ? '已保存在当前 Windows 用户账户' : '尚未配置该供应商凭据'}</small>
+                      <small>{credentialStatus[selectedProvider.id] ? '已保存到系统凭据存储' : '尚未配置凭据'}</small>
                     </span>
                     <b className={credentialStatus[selectedProvider.id] ? 'is-ready' : ''}>
                       {credentialStatus[selectedProvider.id] ? '已保存' : '未配置'}
                     </b>
                   </div>
                   <label>
-                    <span>{credentialStatus[selectedProvider.id] ? '输入新 Key 可覆盖当前凭据' : 'API Key'}</span>
+                    <span>API Key</span>
                     <input
                       type="password"
                       autoComplete="off"
                       value={apiKeyInputs[selectedProvider.id] || ''}
                       onChange={(event) => setApiKeyInputs((current) => ({ ...current, [selectedProvider.id]: event.target.value }))}
-                      placeholder={credentialStatus[selectedProvider.id] ? '••••••••••••••••' : '输入供应商 API Key'}
+                      placeholder={credentialStatus[selectedProvider.id] ? '输入新 Key 以覆盖当前凭据' : '输入供应商 API Key'}
                     />
                   </label>
                   <div className="settings-credential__actions">
@@ -407,7 +396,7 @@ export function ModelSettingsWorkspace({
                 </div>
               </section>
             ) : (
-              <EmptyRegistry icon={<Server size={24}/>} title="暂无供应商" description="添加供应商后即可维护连接信息与凭据。" onAction={addProvider} actionLabel="新增供应商"/>
+              <EmptyRegistry icon={<Server size={24}/>} title="暂无供应商" description="维护连接信息与凭据" onAction={addProvider} actionLabel="新增供应商"/>
             )}
           </div>
         ) : tab === 'vision' ? (
@@ -434,7 +423,6 @@ export function ModelSettingsWorkspace({
               <section className="settings-card settings-editor">
                 <div className="settings-card__head">
                   <div>
-                    <span className="kicker">VISION MODEL</span>
                     <h3>{selectedVision.name || '未命名视觉模型'}</h3>
                   </div>
                   <button className="icon-button icon-button--danger" type="button" title="删除视觉模型" onClick={() => deleteVision(selectedVision)}>
@@ -472,7 +460,6 @@ export function ModelSettingsWorkspace({
                     <Eye size={15}/>
                     <span>
                       <strong>用于视觉分析</strong>
-                      <small>AI 追色、配方分析与提示词优化将使用此模型。</small>
                     </span>
                   </div>
                   <button
@@ -486,7 +473,7 @@ export function ModelSettingsWorkspace({
                 </div>
               </section>
             ) : (
-              <EmptyRegistry icon={<Eye size={24}/>} title="暂无视觉模型" description="添加视觉模型以启用图片理解与调色配方分析。" onAction={addVision} actionLabel="新增视觉模型"/>
+              <EmptyRegistry icon={<Eye size={24}/>} title="暂无视觉模型" description="用于图片理解与调色配方分析" onAction={addVision} actionLabel="新增视觉模型"/>
             )}
           </div>
         ) : (
@@ -513,7 +500,6 @@ export function ModelSettingsWorkspace({
               <section className="settings-card settings-editor">
                 <div className="settings-card__head">
                   <div>
-                    <span className="kicker">IMAGE MODEL</span>
                     <h3>{selectedImage.name || '未命名图像模型'}</h3>
                   </div>
                   <button className="icon-button icon-button--danger" type="button" title="删除图像模型" onClick={() => deleteImage(selectedImage)}>
@@ -559,8 +545,8 @@ export function ModelSettingsWorkspace({
                       <strong>用于图像生成 / 编辑</strong>
                       <small>
                         {selectedImageUsesGenerations
-                          ? '不上传原图；输出质量、尺寸等参数在每次使用时配置。'
-                          : '会发送重编码图片；输出质量与尺寸在每次使用时配置。'}
+                          ? '不上传原图'
+                          : '会发送重编码图片'}
                       </small>
                     </span>
                   </div>
@@ -575,7 +561,7 @@ export function ModelSettingsWorkspace({
                 </div>
               </section>
             ) : (
-              <EmptyRegistry icon={<Image size={24}/>} title="暂无图像模型" description="添加模型后，图像编辑或纯文本生图会使用独立供应商。" onAction={addImage} actionLabel="新增图像模型"/>
+              <EmptyRegistry icon={<Image size={24}/>} title="暂无图像模型" description="用于图像编辑与纯文本生图" onAction={addImage} actionLabel="新增图像模型"/>
             )}
           </div>
         )}

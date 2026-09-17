@@ -137,7 +137,7 @@ fn configured_library_root(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     Ok(Some(path))
 }
 
-fn library_root(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn library_root(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(configured_library_root(app)?.unwrap_or(default_library_root(app)?))
 }
 
@@ -200,7 +200,7 @@ fn sanitize_segment(segment: &str) -> String {
 }
 
 /// Normalize a relative path: strip leading slashes, reject `..`, sanitize segments.
-fn normalize_relative_path(raw: &str, kind: AssetKind) -> Result<String, String> {
+pub(crate) fn normalize_relative_path(raw: &str, kind: AssetKind) -> Result<String, String> {
     let mut parts: Vec<String> = Vec::new();
     for part in raw.replace('\\', "/").split('/') {
         if part.is_empty() || part == "." {

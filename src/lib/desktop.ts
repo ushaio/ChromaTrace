@@ -4,8 +4,10 @@ import { configDir, dirname, join, pictureDir } from '@tauri-apps/api/path'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { load } from '@tauri-apps/plugin-store'
 import type {
-  ColorWorkflowSuggestion, GeneratedImageResult, ImageGenerationRequestOptions, ImageGenerationRuntimeConfig, ModelColorParameters,
-  ModelProvider, ModelSettings, VisionRuntimeConfig,
+  ColorWorkflowSuggestion, DeleteWorkspacePhotosReport, GeneratedImageResult, ImageGenerationRequestOptions, ImageGenerationRuntimeConfig, ModelColorParameters,
+  ModelProvider, ModelSettings, ResolvedWorkspacePhoto, SourceVolume, VisionRuntimeConfig, VolumePolicy, WorkspaceCacheReport,
+  WorkspaceDiskSpace, WorkspaceImportEntry, WorkspaceImportProgress, WorkspaceImportReport, WorkspaceInfo, WorkspaceManifest,
+  WorkspaceReferenceEntry, WorkspacePhotoProperties, WorkspaceVolumeAbsence, VolumePolicyRecord,
 } from './types'
 import { DEFAULT_MODEL_SETTINGS } from './defaults'
 import { normalizeModelSettings } from './modelSettings'
@@ -868,3 +870,459 @@ function imageRuntimeConfig(config: ImageGenerationRuntimeConfig) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 工作区（多图导入 + 缩略图缓存）
+// ---------------------------------------------------------------------------
+
+/** V1 只有一个当前工作区；磁盘结构已按 `workspaces/<id>/` 预留多工作区。 */
+export const DEFAULT_WORKSPACE_ID = 'default'
+
+/** 浏览器预览用的工作区注册表：桌面端由 Rust 侧 `workspaces.json` 承载。 */
+const browserWorkspaceRegistry: WorkspaceInfo[] = [
+  { id: DEFAULT_WORKSPACE_ID, name: '默认工作区', createdAt: Date.now(), updatedAt: Date.now() },
+]
+
+/**
+ * 列出全部工作区。
+ *
+ * 注册表只存名称等元数据；张数与封面由调用方按需读各工作区的 manifest 惰性补全。
+ * 首次运行时 Rust 侧会以现有 `default` 目录播种，前端无需特殊处理。
+ */
+export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
+  if (!isTauri()) return [...browserWorkspaceRegistry]
+  return invoke<WorkspaceInfo[]>('list_workspaces')
+}
+
+export async function createWorkspace(name: string): Promise<WorkspaceInfo> {
+  if (!isTauri()) {
+    const trimmed = name.trim()
+    if (!trimmed) throw new Error('工作区名称不能为空')
+    const base = trimmed.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'workspace'
+    let id = base
+    let index = 2
+    while (browserWorkspaceRegistry.some((entry) => entry.id === id)) {
+      id = `${base}-${index}`
+      index += 1
+    }
+    const now = Date.now()
+    const info: WorkspaceInfo = { id, name: trimmed, createdAt: now, updatedAt: now }
+    browserWorkspaceRegistry.push(info)
+    browserManifest(id)
+    return info
+  }
+  return invoke<WorkspaceInfo>('create_workspace', { name })
+}
+
+export async function renameWorkspace(workspaceId: string, name: string): Promise<WorkspaceInfo> {
+  if (!isTauri()) {
+    const entry = browserWorkspaceRegistry.find((item) => item.id === workspaceId)
+    if (!entry) throw new Error('工作区不存在')
+    entry.name = name.trim()
+    entry.updatedAt = Date.now()
+    return { ...entry }
+  }
+  return invoke<WorkspaceInfo>('rename_workspace', { workspaceId, name })
+}
+
+export async function deleteWorkspace(workspaceId: string): Promise<void> {
+  if (!isTauri()) {
+    if (browserWorkspaceRegistry.length <= 1) throw new Error('至少需要保留一个工作区')
+    const index = browserWorkspaceRegistry.findIndex((entry) => entry.id === workspaceId)
+    if (index < 0) throw new Error('工作区不存在')
+    browserWorkspaceRegistry.splice(index, 1)
+    browserWorkspaces.delete(workspaceId)
+    const prefix = `${workspaceId}|`
+    for (const key of [...browserThumbnails.keys()]) {
+      if (key.startsWith(prefix)) browserThumbnails.delete(key)
+    }
+    return
+  }
+  await invoke('delete_workspace', { workspaceId })
+}
+
+/** 多选文件选择器：工作区导入用。 */
+export async function pickImagePaths(): Promise<string[]> {
+  if (!isTauri()) return []
+  const defaultPath = await imageDefaultPath()
+  const options = {
+    multiple: true as const,
+    directory: false as const,
+    title: '选择要导入工作区的图片 / RAW',
+    filters: [
+      { name: '图片与相机 RAW', extensions: [...IMAGE_EXTENSIONS] },
+      { name: '相机 RAW', extensions: [...RAW_EXTENSIONS] },
+      { name: 'JPEG / PNG / WebP', extensions: ['jpg', 'jpeg', 'png', 'webp'] },
+    ],
+  }
+  let selected: string | string[] | null
+  try {
+    selected = await open({ ...options, defaultPath })
+  } catch (error) {
+    if (!defaultPath) throw error
+    selected = await open(options)
+  }
+  const paths = typeof selected === 'string' ? [selected] : Array.isArray(selected) ? selected : []
+  if (paths[0]) {
+    try {
+      const store = await load(STORE_PATH)
+      await store.set(LAST_IMAGE_DIRECTORY_KEY, await dirname(paths[0]))
+      await store.save()
+    } catch {
+      // 记住目录失败不影响导入本身
+    }
+  }
+  return paths
+}
+
+/**
+ * 浏览器预览用的内存工作区：按 `workspaceId` 隔离，不伪造桌面复制语义，只保证组件不崩。
+ *
+ * 这里**必须**是 Map 而不是单个变量——多工作区下若共用一份 manifest，切换工作区在浏览器里
+ * 会表现为「毫无变化」，从而掩盖真实的切换缺陷。
+ */
+const browserWorkspaces = new Map<string, WorkspaceManifest>()
+/** 缩略图缓存：key 带上 workspaceId 前缀，避免不同工作区的同名图互相覆盖。 */
+const browserThumbnails = new Map<string, Uint8Array>()
+
+function browserThumbnailKey(workspaceId: string, key: string) {
+  return `${workspaceId}|${key}`
+}
+
+function emptyBrowserManifest(workspaceId = DEFAULT_WORKSPACE_ID): WorkspaceManifest {
+  const now = Date.now()
+  return {
+    version: 1,
+    id: workspaceId,
+    createdAt: now,
+    updatedAt: now,
+    revision: 0,
+    reference: null,
+    photos: [],
+  }
+}
+
+function browserManifest(workspaceId: string): WorkspaceManifest {
+  const existing = browserWorkspaces.get(workspaceId)
+  if (existing) return existing
+  const created = emptyBrowserManifest(workspaceId)
+  browserWorkspaces.set(workspaceId, created)
+  return created
+}
+
+function setBrowserManifest(manifest: WorkspaceManifest) {
+  browserWorkspaces.set(manifest.id, manifest)
+}
+
+export async function readWorkspaceManifest(
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<WorkspaceManifest> {
+  if (!isTauri()) return browserManifest(workspaceId)
+  return invoke<WorkspaceManifest>('read_workspace_manifest', { workspaceId })
+}
+
+/** `expectedRevision` 用于乐观并发：磁盘 revision 不一致时后端拒绝覆盖。 */
+export async function writeWorkspaceManifest(
+  manifest: WorkspaceManifest,
+  expectedRevision: number | null,
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<WorkspaceManifest> {
+  if (!isTauri()) {
+    const next = { ...manifest, revision: manifest.revision + 1, updatedAt: Date.now() }
+    setBrowserManifest(next)
+    return next
+  }
+  return invoke<WorkspaceManifest>('write_workspace_manifest', {
+    workspaceId,
+    manifest,
+    expectedRevision,
+  })
+}
+
+/** 按挂载卷做三态判定。判定必须在 Rust 侧完成，前端只消费结论。 */
+export async function classifySourceVolumes(paths: string[]): Promise<SourceVolume[]> {
+  if (!isTauri()) {
+    return [{
+      rootPath: '浏览器预览',
+      volumeId: 'browser-preview',
+      label: '浏览器预览',
+      driveType: 'fixed',
+      recommendation: 'reference',
+      rememberedPolicy: null,
+      fileCount: paths.length,
+      totalBytes: 0,
+    }]
+  }
+  return invoke<SourceVolume[]>('classify_source_volumes', { paths })
+}
+
+/** 卷标识 → 当前挂载点。reference 模式靠它解析真实读取路径。 */
+export async function resolveVolumeMount(volumeId: string): Promise<string | null> {
+  if (!isTauri()) return null
+  return invoke<string | null>('resolve_volume_mount', { volumeId })
+}
+
+export async function getVolumePolicies(): Promise<Record<string, VolumePolicyRecord>> {
+  if (!isTauri()) return {}
+  return invoke<Record<string, VolumePolicyRecord>>('get_volume_policies')
+}
+
+export async function setVolumePolicy(
+  volumeId: string,
+  policy: VolumePolicy,
+  label = '',
+): Promise<void> {
+  if (!isTauri()) return
+  await invoke('set_volume_policy', { volumeId, policy, label })
+}
+
+export async function clearVolumePolicies(): Promise<void> {
+  if (!isTauri()) return
+  await invoke('clear_volume_policies')
+}
+
+/** 单独清除某个卷的记忆。 */
+export async function clearVolumePolicy(volumeId: string): Promise<void> {
+  if (!isTauri()) return
+  await invoke('clear_volume_policy', { volumeId })
+}
+
+/** 通用目录选择：卷重新定位等场景用。 */
+export async function pickDirectory(title: string): Promise<string | null> {
+  if (!isTauri()) return null
+  const options = {
+    multiple: false as const,
+    directory: true as const,
+    recursive: true as const,
+    title,
+  }
+  const selected = await open(options)
+  return typeof selected === 'string'
+    ? selected
+    : Array.isArray(selected) && typeof selected[0] === 'string'
+      ? selected[0]
+      : null
+}
+
+export async function importWorkspaceFiles(
+  entries: WorkspaceImportEntry[],
+  jobId: string,
+  onProgress: (progress: WorkspaceImportProgress) => void,
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<WorkspaceImportReport> {
+  if (!isTauri()) {
+    const now = Date.now()
+    const imported = entries.map((entry) => ({
+      id: `${entry.volumeId}|${entry.relativeSourcePath}`,
+      volumeId: entry.volumeId,
+      relativeSourcePath: entry.relativeSourcePath,
+      sourcePath: entry.sourcePath,
+      origin: entry.origin,
+      workspacePath: null,
+      status: 'ready' as const,
+      sizeBytes: 0,
+      mtimeMs: now,
+      isRaw: isRawPath(entry.sourcePath),
+      width: null,
+      height: null,
+      thumbKey: null,
+      stats: null,
+      referenceOverride: null,
+      develop: null,
+      editedAt: null,
+    }))
+    const current = browserManifest(workspaceId)
+    const next: WorkspaceManifest = {
+      ...current,
+      revision: current.revision + 1,
+      updatedAt: now,
+      photos: [...current.photos, ...imported],
+    }
+    setBrowserManifest(next)
+    return {
+      manifest: next,
+      imported,
+      skipped: [],
+      failed: [],
+      copiedBytes: 0,
+      copiedFiles: 0,
+      cancelled: false,
+    }
+  }
+
+  let unlisten: UnlistenFn | undefined
+  try {
+    unlisten = await listen<WorkspaceImportProgress>('workspace-import-progress', ({ payload }) => {
+      if (payload.jobId === jobId) onProgress(payload)
+    })
+    return await invoke<WorkspaceImportReport>('import_workspace_files', {
+      workspaceId,
+      entries,
+      jobId,
+    })
+  } finally {
+    unlisten?.()
+  }
+}
+
+export async function cancelWorkspaceImport(jobId: string): Promise<void> {
+  if (!isTauri()) return
+  await invoke('cancel_workspace_import', { jobId })
+}
+
+/** 登记参考图：`photoId` 为空表示工作区级共享参考，非空表示单图专属覆盖。 */
+export async function importWorkspaceReference(
+  entry: WorkspaceImportEntry,
+  photoId: string | null,
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<WorkspaceManifest> {
+  if (!isTauri()) return browserManifest(workspaceId)
+  return invoke<WorkspaceManifest>('import_workspace_reference', { workspaceId, entry, photoId })
+}
+
+export async function resolveWorkspacePhotoPaths(
+  photoIds: string[],
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<ResolvedWorkspacePhoto[]> {
+  if (!isTauri()) {
+    return photoIds.map((photoId) => ({
+      photoId,
+      path: null,
+      status: 'missing' as const,
+      reason: '浏览器预览不提供本机路径',
+      volumeMounted: false,
+    }))
+  }
+  return invoke<ResolvedWorkspacePhoto[]>('resolve_workspace_photo_paths', { workspaceId, photoIds })
+}
+
+/** 解析参考图真实读取路径：copy 读 references/ 副本，reference 读当前挂载点。 */
+export async function resolveWorkspaceReferencePath(
+  reference: WorkspaceReferenceEntry,
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<string | null> {
+  if (!isTauri()) return null
+  return invoke<string | null>('resolve_workspace_reference_path', { workspaceId, reference })
+}
+
+/** 按卷聚合的卷缺席清单：一个卷一条，不逐张弹窗。 */
+export async function listAbsentWorkspaceVolumes(
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<WorkspaceVolumeAbsence[]> {
+  if (!isTauri()) return []
+  return invoke<WorkspaceVolumeAbsence[]>('list_absent_workspace_volumes', { workspaceId })
+}
+
+export async function readWorkspaceThumbnail(
+  workspaceId: string,
+  key: string,
+): Promise<Uint8Array | null> {
+  if (!isTauri()) return browserThumbnails.get(browserThumbnailKey(workspaceId, key)) ?? null
+  const bytes = await invoke<number[] | null>('read_workspace_thumbnail', { workspaceId, key })
+  return bytes ? new Uint8Array(bytes) : null
+}
+
+export async function writeWorkspaceThumbnail(
+  workspaceId: string,
+  key: string,
+  data: Uint8Array,
+): Promise<void> {
+  if (!isTauri()) {
+    browserThumbnails.set(browserThumbnailKey(workspaceId, key), data)
+    return
+  }
+  await invoke('write_workspace_thumbnail', { workspaceId, key, data: Array.from(data) })
+}
+
+export async function purgeWorkspaceThumbnails(
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<WorkspaceCacheReport> {
+  if (!isTauri()) {
+    const prefix = `${workspaceId}|`
+    for (const key of [...browserThumbnails.keys()]) {
+      if (key.startsWith(prefix)) browserThumbnails.delete(key)
+    }
+    return { removedFiles: 0, freedBytes: 0 }
+  }
+  return invoke<WorkspaceCacheReport>('purge_workspace_thumbnails', { workspaceId })
+}
+
+/** 清空工作区：删除 manifest 条目与 originals/、references/、thumbs/ 下的全部副本。 */
+export async function clearWorkspace(
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<WorkspaceCacheReport> {
+  if (!isTauri()) {
+    setBrowserManifest(emptyBrowserManifest(workspaceId))
+    const prefix = `${workspaceId}|`
+    for (const key of [...browserThumbnails.keys()]) {
+      if (key.startsWith(prefix)) browserThumbnails.delete(key)
+    }
+    return { removedFiles: 0, freedBytes: 0 }
+  }
+  return invoke<WorkspaceCacheReport>('clear_workspace', { workspaceId })
+}
+
+/** 空间预检：按实际字节数返回复制目标盘的可用容量。 */
+export async function getWorkspaceDiskSpace(
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<WorkspaceDiskSpace> {
+  if (!isTauri()) return { path: '', availableBytes: 0, totalBytes: 0 }
+  return invoke<WorkspaceDiskSpace>('workspace_disk_space', { workspaceId })
+}
+
+export async function openWorkspaceFolder(workspaceId = DEFAULT_WORKSPACE_ID): Promise<void> {
+  if (!isTauri()) throw new Error('仅桌面客户端支持打开工作区文件夹')
+  await invoke('open_workspace_folder', { workspaceId })
+}
+
+/** RAW 缩略图：优先走相机内嵌预览快路径，失败时后端回落完整解码。 */
+export async function decodeRawThumbnailNative(path: string, maxSide = 256) {
+  return new Uint8Array(await invoke<number[]>('decode_raw_thumbnail', { path, maxSide }))
+}
+
+
+// ---------------------------------------------------------------------------
+// 图片属性 / 定位 / 删除（内容页右键菜单）
+// ---------------------------------------------------------------------------
+
+/** 读取一张图片的属性（文件信息 + EXIF）。EXIF 只在桌面端可得。 */
+export async function readPhotoProperties(
+  photoId: string,
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<WorkspacePhotoProperties> {
+  if (!isTauri()) throw new Error('仅桌面客户端支持读取 EXIF 属性')
+  return invoke<WorkspacePhotoProperties>('read_workspace_photo_properties', { workspaceId, photoId })
+}
+
+/** 在系统文件管理器中定位图片，返回被定位的路径。 */
+export async function revealPhotoLocation(
+  photoId: string,
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<string> {
+  if (!isTauri()) throw new Error('仅桌面客户端支持打开文件所在位置')
+  return invoke<string>('reveal_photo_location', { workspaceId, photoId })
+}
+
+/**
+ * 从工作区移除若干图片（多选批量共用这一条）。
+ *
+ * 只删工作区自己的副本与记录，绝不删源文件；返回删除后的 manifest，前端直接接管。
+ */
+export async function deleteWorkspacePhotos(
+  photoIds: string[],
+  workspaceId = DEFAULT_WORKSPACE_ID,
+): Promise<DeleteWorkspacePhotosReport> {
+  if (!isTauri()) {
+    // 浏览器预览没有副本可回收，只改内存 manifest，保证交互不被挡住。
+    const current = browserManifest(workspaceId)
+    const remove = new Set(photoIds)
+    const next: WorkspaceManifest = {
+      ...current,
+      revision: current.revision + 1,
+      updatedAt: Date.now(),
+      photos: current.photos.filter((photo) => !remove.has(photo.id)),
+    }
+    setBrowserManifest(next)
+    return { manifest: next, removedPhotoIds: [...remove], removedFiles: 0, freedBytes: 0 }
+  }
+  return invoke<DeleteWorkspacePhotosReport>('delete_workspace_photos', { workspaceId, photoIds })
+}
