@@ -1,7 +1,7 @@
 ﻿import {
-  Aperture, AppWindow, ArrowRight, Check, ChevronDown, CircleHelp, CloudCog, Download, FolderKanban, KeyRound,
+  Aperture, ArrowRight, Check, ChevronDown, CircleHelp, CloudCog, Download, FolderKanban,
   LoaderCircle, LockKeyhole, LayoutGrid, Minus, Moon, Palette, RotateCcw, Save, ScanSearch, Settings2, SlidersHorizontal,
-  Sparkles, Square, Sun, Upload, WandSparkles, Wifi, WifiOff, X,
+  Sparkles, Square, Sun, Upload, WandSparkles, X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
@@ -285,11 +285,6 @@ function App() {
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('match')
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance')
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => window.localStorage.getItem('chroma-trace-theme') === 'light' ? 'light' : 'dark')
-  /** Frameless immersive chrome (true) vs OS native decorations (false). Desktop only. */
-  const [integratedWindow, setIntegratedWindow] = useState(
-    () => window.localStorage.getItem('chroma-trace-integrated-window') !== 'false',
-  )
-  const [windowStyleChanging, setWindowStyleChanging] = useState(false)
   const [compare, setCompare] = useState(50)
   const [compareMode, setCompareMode] = useState<CompareMode>('wipe')
   const [previewEngine, setPreviewEngine] = useState<PreviewEngine>('initializing')
@@ -538,30 +533,6 @@ function App() {
     : matchRenderMode === 'local'
       ? '本地 OKLab 迁移'
       : '基础'
-  const changeIntegratedWindow = useCallback(async (nextIntegrated: boolean) => {
-    if (windowStyleChanging || nextIntegrated === integratedWindow) return
-
-    if (!isTauri()) {
-      setIntegratedWindow(nextIntegrated)
-      window.localStorage.setItem('chroma-trace-integrated-window', nextIntegrated ? 'true' : 'false')
-      return
-    }
-
-    setWindowStyleChanging(true)
-    try {
-      const appWindow = getCurrentWindow()
-      await appWindow.setDecorations(!nextIntegrated)
-      const appliedIntegrated = !(await appWindow.isDecorated())
-      if (appliedIntegrated !== nextIntegrated) throw new Error('\u7cfb\u7edf\u672a\u5e94\u7528\u6240\u9009\u7a97\u53e3\u6837\u5f0f')
-
-      setIntegratedWindow(appliedIntegrated)
-      window.localStorage.setItem('chroma-trace-integrated-window', appliedIntegrated ? 'true' : 'false')
-    } catch (error) {
-      notify(errorMessage(error, '\u5207\u6362\u7a97\u53e3\u6837\u5f0f\u5931\u8d25'), 'error')
-    } finally {
-      setWindowStyleChanging(false)
-    }
-  }, [integratedWindow, notify, windowStyleChanging])
   const helpContent = workspaceMode === 'match'
     ? {
         title: '如何使用 AI 追色',
@@ -614,38 +585,9 @@ function App() {
 
   useEffect(() => {
     if (!isTauri()) return
-
-    let cancelled = false
-    const savedIntegrated = integratedWindow
-    const appWindow = getCurrentWindow()
-    // Restore the saved preference and verify the actual OS decoration state.
-    void appWindow.setDecorations(!savedIntegrated)
-      .then(() => appWindow.isDecorated())
-      .then((decorated) => {
-        if (cancelled) return
-        const appliedIntegrated = !decorated
-        if (appliedIntegrated !== savedIntegrated) {
-          setIntegratedWindow(appliedIntegrated)
-          window.localStorage.setItem('chroma-trace-integrated-window', appliedIntegrated ? 'true' : 'false')
-        }
-      })
-      .catch(async (error) => {
-        if (cancelled) return
-        try {
-          const appliedIntegrated = !(await appWindow.isDecorated())
-          if (!cancelled) {
-            setIntegratedWindow(appliedIntegrated)
-            window.localStorage.setItem('chroma-trace-integrated-window', appliedIntegrated ? 'true' : 'false')
-          }
-        } catch {
-          // Keep the saved value if the host cannot report its decoration state.
-        }
-        if (!cancelled) notify(errorMessage(error, '\u6062\u590d\u7a97\u53e3\u6837\u5f0f\u5931\u8d25'), 'error')
-      })
-
-    return () => { cancelled = true }
-    // This synchronizes the persisted preference once when the desktop shell mounts.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // 桌面端只有一体化窗口一种形态：清掉旧版的窗口样式偏好，并确保系统标题栏保持关闭。
+    window.localStorage.removeItem('chroma-trace-integrated-window')
+    void getCurrentWindow().setDecorations(false).catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -1006,7 +948,7 @@ function App() {
   }
 
   return (
-    <div className={`app-shell ${isTauri() ? 'app-shell--compact' : ''} ${isTauri() && integratedWindow ? 'app-shell--integrated' : ''} ${windowMaximized && integratedWindow ? 'is-maximized' : ''}`}>
+    <div className={`app-shell ${isTauri() ? 'app-shell--compact app-shell--integrated' : ''}`}>
       <input
         ref={browserSourceInput}
         className="visually-hidden"
@@ -1019,19 +961,15 @@ function App() {
           event.target.value = ''
         }}
       />
-      <header className="topbar">
+      {/* 一体化窗口的拖动区：Tauri 只让 drag region 响应拖动与双击最大化。
+          顶栏整片留作可拖区，按钮等可交互元素由 runtime 自动排除。 */}
+      <header className="topbar" data-tauri-drag-region={isTauri() ? 'deep' : undefined}>
         <div className="topbar__left">
-          <div
-            className="brand"
-            {...(integratedWindow ? {
-              'data-tauri-drag-region': true,
-              onDoubleClick: () => void windowControl('toggleMaximize'),
-            } : {})}
-          >
-            <span className="brand__mark" {...(integratedWindow ? { 'data-tauri-drag-region': true } : {})}><Aperture size={18} strokeWidth={1.7} /></span>
-            <div {...(integratedWindow ? { 'data-tauri-drag-region': true } : {})}>
-              <strong {...(integratedWindow ? { 'data-tauri-drag-region': true } : {})}>色迹</strong>
-              <span {...(integratedWindow ? { 'data-tauri-drag-region': true } : {})}>CHROMA TRACE</span>
+          <div className="brand">
+            <span className="brand__mark"><Aperture size={18} strokeWidth={1.7} /></span>
+            <div>
+              <strong>色迹</strong>
+              <span>CHROMA TRACE</span>
             </div>
           </div>
           {/* 工作区控件留在左侧组、与品牌同列：它表达「在哪个库里」，
@@ -1058,7 +996,7 @@ function App() {
               <ChevronDown size={14} />
             </button>
             {switcherOpen ? (
-              <div className="workspace-switcher__menu" role="menu" aria-label="工作区列表">
+              <div className="workspace-switcher__menu" role="menu" aria-label="工作区列表" data-tauri-drag-region="false">
                 {workspaces.length === 0 ? (
                   <p className="workspace-switcher__empty">暂无工作区</p>
                 ) : workspaces.map((entry) => (
@@ -1101,7 +1039,7 @@ function App() {
           <button className={workspaceMode === 'settings' ? 'is-active' : ''} onClick={() => setWorkspaceMode('settings')}><Settings2 size={15}/> 设置</button>
         </nav>
         {workspaceSwitchPending ? (
-          <div className="workspace-switch-confirm" role="dialog" aria-label="确认切换工作区">
+          <div className="workspace-switch-confirm" role="dialog" aria-label="确认切换工作区" data-tauri-drag-region="false">
             <p>
               正在编辑「{activeWorkspace?.name ?? '当前工作区'}」，
               切换到「{workspaces.find((entry) => entry.id === workspaceSwitchPending)?.name ?? workspaceSwitchPending}」？
@@ -1115,10 +1053,7 @@ function App() {
         <div className="topbar__actions">
           {isEditorMode ? (
             <>
-              <span
-                className={`privacy-pill ${modelSettings.enabled ? 'is-cloud' : ''}`}
-            {...(integratedWindow ? { 'data-tauri-drag-region': true } : {})}
-          >
+              <span className={`privacy-pill ${modelSettings.enabled ? 'is-cloud' : ''}`}>
             {modelSettings.enabled ? <CloudCog size={13}/> : <LockKeyhole size={13}/>} 
             {modelSettings.enabled ? '增强模式会发送缩略图' : '图片仅在本机处理'}
           </span>
@@ -1144,7 +1079,7 @@ function App() {
               <CircleHelp size={18}/>
             </button>
             {helpOpen ? (
-              <section id="workspace-help" className="help-popover" role="dialog" aria-label={helpContent.title}>
+              <section id="workspace-help" className="help-popover" role="dialog" aria-label={helpContent.title} data-tauri-drag-region="false">
                 <div className="help-popover__head">
                   <div><h2>{helpContent.title}</h2></div>
                   <button type="button" className="icon-button" title="关闭帮助" onClick={() => setHelpOpen(false)}><X size={15}/></button>
@@ -1168,7 +1103,7 @@ function App() {
               <span>{exportBusy ? '正在导出' : '导出效果图'}</span>
             </button>
           ) : null}
-          {isTauri() && integratedWindow ? (
+          {isTauri() ? (
             <div className="window-controls" role="group" aria-label="窗口控制">
               <button type="button" className="window-control" title="最小化" aria-label="最小化" onClick={() => void windowControl('minimize')}>
                 <Minus size={14} strokeWidth={2.2} />
@@ -1391,55 +1326,6 @@ function App() {
                       </button>
                     </div>
                   </section>
-
-                  {isTauri() ? (
-                    <section className="settings-card appearance-window-card">
-                      <div className="settings-card__head">
-                        <div>
-                          <h3>一体式窗口</h3>
-                        </div>
-                      </div>
-
-                      <div className="window-style-stage" role="radiogroup" aria-label="窗口样式">
-                        <button
-                          type="button"
-                          role="radio"
-                          aria-checked={integratedWindow}
-                          aria-busy={windowStyleChanging}
-                          disabled={windowStyleChanging}
-                          className={`window-style-tile ${integratedWindow ? 'is-active' : ''}`}
-                          onClick={() => void changeIntegratedWindow(true)}
-                        >
-                          <span className="window-style-tile__preview window-style-tile__preview--integrated" aria-hidden="true">
-                            <i className="window-style-tile__chrome"/><i className="window-style-tile__body"/><i className="window-style-tile__btn"/><i className="window-style-tile__btn"/><i className="window-style-tile__btn"/>
-                          </span>
-                          <span className="window-style-tile__meta">
-                            <AppWindow size={15}/>
-                            <span><strong>一体式</strong></span>
-                            {integratedWindow ? <Check size={14} className="window-style-tile__check"/> : null}
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          role="radio"
-                          aria-checked={!integratedWindow}
-                          aria-busy={windowStyleChanging}
-                          disabled={windowStyleChanging}
-                          className={`window-style-tile ${!integratedWindow ? 'is-active' : ''}`}
-                          onClick={() => void changeIntegratedWindow(false)}
-                        >
-                          <span className="window-style-tile__preview window-style-tile__preview--native" aria-hidden="true">
-                            <i className="window-style-tile__os-bar"/><i className="window-style-tile__body"/><i className="window-style-tile__os-btn"/><i className="window-style-tile__os-btn"/><i className="window-style-tile__os-btn"/>
-                          </span>
-                          <span className="window-style-tile__meta">
-                            <Square size={15}/>
-                            <span><strong>原生窗口</strong></span>
-                            {!integratedWindow ? <Check size={14} className="window-style-tile__check"/> : null}
-                          </span>
-                        </button>
-                      </div>
-                    </section>
-                  ) : null}
                 </div>
               </section>
             ) : settingsSection === 'library' ? (

@@ -101,6 +101,8 @@ button:disabled { opacity: .38; cursor: not-allowed !important; }
   z-index: 10;
   flex: 0 0 auto;
 }
+/* 顶栏可拖区域（header 自身 + 内部显式标记的弹层）统一用默认光标，避免文字处出现 I 形光标。 */
+.topbar[data-tauri-drag-region],
 .topbar [data-tauri-drag-region] { cursor: default; }
 /* 品牌 + 工作区控件同处左侧列。用 gap 而非 space-between：两者整体靠左，
    与中间居中的模式标签拉开距离，这样标签的居中基准不受左侧内容宽度影响。 */
@@ -1409,128 +1411,11 @@ button:disabled { opacity: .38; cursor: not-allowed !important; }
   align-content: start;
   gap: 14px;
 }
-.appearance-theme-card,
-.appearance-window-card {
+.appearance-theme-card {
   width: min(760px, 100%);
   padding: 18px;
 }
-
-/* Window chrome style picker (integrated vs native) */
-.window-style-stage {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-.window-style-tile {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, .02);
-  padding: 10px;
-  display: grid;
-  gap: 10px;
-  text-align: left;
-  cursor: pointer;
-  color: inherit;
-  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease;
-}
-.window-style-tile:hover {
-  border-color: rgba(235, 238, 227, .2);
-  background: rgba(255, 255, 255, .03);
-}
-.window-style-tile.is-active {
-  border-color: rgba(122, 224, 212, .42);
-  background: rgba(122, 224, 212, .06);
-  box-shadow: 0 0 0 1px rgba(122, 224, 212, .12);
-}
-.window-style-tile__preview {
-  position: relative;
-  height: 88px;
-  border-radius: 7px;
-  overflow: hidden;
-  border: 1px solid rgba(235, 238, 227, .1);
-  background: #0c0d0c;
-}
-.window-style-tile__preview--integrated {
-  background:
-    linear-gradient(180deg, rgba(122, 224, 212, .05), transparent 36px),
-    #0c0d0c;
-}
-.window-style-tile__preview--native {
-  background: #1a1c1a;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .04);
-}
-.window-style-tile__chrome {
-  position: absolute;
-  left: 0; right: 0; top: 0;
-  height: 18px;
-  background: linear-gradient(180deg, #171916, #121412);
-  border-bottom: 1px solid rgba(235, 238, 227, .1);
-}
-.window-style-tile__os-bar {
-  position: absolute;
-  left: 0; right: 0; top: 0;
-  height: 14px;
-  background: #2a2d2a;
-  border-bottom: 1px solid rgba(0, 0, 0, .35);
-}
-.window-style-tile__body {
-  position: absolute;
-  left: 8px; right: 8px; bottom: 8px;
-  top: 26px;
-  border-radius: 4px;
-  background:
-    linear-gradient(90deg, #151715 28%, transparent 28%),
-    linear-gradient(90deg, transparent 72%, #151715 72%),
-    #101210;
-  border: 1px solid rgba(235, 238, 227, .06);
-}
-.window-style-tile__preview--native .window-style-tile__body {
-  top: 22px;
-}
-.window-style-tile__btn {
-  position: absolute;
-  top: 5px;
-  width: 7px;
-  height: 7px;
-  border-radius: 1px;
-  background: rgba(235, 238, 227, .28);
-}
-.window-style-tile__btn:nth-of-type(3) { right: 28px; }
-.window-style-tile__btn:nth-of-type(4) { right: 17px; }
-.window-style-tile__btn:nth-of-type(5) { right: 6px; background: rgba(232, 17, 35, .7); }
-.window-style-tile__os-btn {
-  position: absolute;
-  top: 4px;
-  width: 8px;
-  height: 6px;
-  border-radius: 1px;
-  background: rgba(235, 238, 227, .35);
-}
-.window-style-tile__os-btn:nth-of-type(3) { right: 28px; }
-.window-style-tile__os-btn:nth-of-type(4) { right: 17px; }
-.window-style-tile__os-btn:nth-of-type(5) { right: 6px; }
-.window-style-tile__meta {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 8px;
-  align-items: center;
-  color: #a7ada6;
-}
-.window-style-tile__meta strong {
-  display: block;
-  color: #d9ddd5;
-  font-size: 12px;
-  font-weight: 620;
-}
-.window-style-tile__meta small {
-  display: block;
-  margin-top: 2px;
-  color: #6f756e;
-  font-size: 9px;
-  line-height: 1.45;
-}
-.window-style-tile__check { color: var(--mint); flex-shrink: 0; }
-.window-style-tile.is-active .window-style-tile__meta { color: #c5cbc3; }
+/* 窗口样式不再是可选项：桌面端固定为一体化窗口，故不再提供切换卡片。 */
 
 .library-settings-panel {
   height: 100%;
@@ -3575,45 +3460,6 @@ body.is-library-dragging * {
   background: linear-gradient(160deg, rgba(15,111,102,.08), #f7f9f5 55%);
 }
 :root[data-theme='light'] .theme-tile.is-active .theme-tile__meta strong { color: #0c4f48; }
-:root[data-theme='light'] .window-style-tile { background: #f7f9f5; }
-:root[data-theme='light'] .window-style-tile:hover {
-  border-color: rgba(38, 48, 39, .16);
-  background: #f3f6f1;
-}
-:root[data-theme='light'] .window-style-tile.is-active {
-  background: linear-gradient(160deg, rgba(15,111,102,.08), #f7f9f5 55%);
-  border-color: rgba(15, 111, 102, .35);
-  box-shadow: 0 0 0 1px rgba(15, 111, 102, .1);
-}
-:root[data-theme='light'] .window-style-tile__meta strong { color: var(--text-primary); }
-:root[data-theme='light'] .window-style-tile.is-active .window-style-tile__meta strong { color: #0c4f48; }
-:root[data-theme='light'] .window-style-tile__meta small { color: var(--text-tertiary); }
-:root[data-theme='light'] .window-style-tile__preview {
-  border-color: rgba(38, 48, 39, .1);
-  background: #e8ece6;
-}
-:root[data-theme='light'] .window-style-tile__preview--integrated {
-  background: linear-gradient(180deg, rgba(15, 111, 102, .06), transparent 36px), #e8ece6;
-}
-:root[data-theme='light'] .window-style-tile__preview--native { background: #dfe4dc; }
-:root[data-theme='light'] .window-style-tile__chrome {
-  background: linear-gradient(180deg, #fbfcf9, #f3f5f0);
-  border-bottom-color: rgba(38, 48, 39, .1);
-}
-:root[data-theme='light'] .window-style-tile__os-bar {
-  background: #c5ccc3;
-  border-bottom-color: rgba(0, 0, 0, .12);
-}
-:root[data-theme='light'] .window-style-tile__body {
-  background:
-    linear-gradient(90deg, #f3f5f0 28%, transparent 28%),
-    linear-gradient(90deg, transparent 72%, #f3f5f0 72%),
-    #dde2da;
-  border-color: rgba(38, 48, 39, .08);
-}
-:root[data-theme='light'] .window-style-tile__btn { background: rgba(38, 48, 39, .28); }
-:root[data-theme='light'] .window-style-tile__btn:nth-of-type(5) { background: rgba(232, 17, 35, .7); }
-:root[data-theme='light'] .window-style-tile__os-btn { background: rgba(38, 48, 39, .35); }
 :root[data-theme='light'] .settings-switch input {
   border-color: #aeb6ad;
   background: #d8ded6;
