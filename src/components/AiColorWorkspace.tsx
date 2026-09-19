@@ -149,7 +149,16 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
 
   const gradeFrameSize = useElementSize(gradePreviewFrameRef, Boolean(source))
   const [stableGradeFrame, setStableGradeFrame] = useState(gradeFrameSize)
+  /** 是否已经拿到过一次真实尺寸（见下：首次测量立即提交，此后才做 80ms 抖动抑制）。 */
+  const gradeFrameMeasuredRef = useRef(false)
   useEffect(() => {
+    // 首次真实测量立即提交：进页面时再等一个 80ms 防抖窗口只会把照片首帧整体推后一个周期，
+    // 而此前的 {0,0} 本来也没有可比较的尺寸。抖动抑制只对「已有尺寸之后再变化」有意义。
+    if (!gradeFrameMeasuredRef.current && isViewportMeasured(gradeFrameSize.width, gradeFrameSize.height)) {
+      gradeFrameMeasuredRef.current = true
+      setStableGradeFrame(gradeFrameSize)
+      return
+    }
     const timer = window.setTimeout(() => setStableGradeFrame(gradeFrameSize), 80)
     return () => window.clearTimeout(timer)
   }, [gradeFrameSize.width, gradeFrameSize.height])
@@ -173,7 +182,9 @@ export const AiColorWorkspace = forwardRef<AiColorWorkspaceHandle, AiColorWorksp
     if (gradePreviewData && originalCanvas.current) {
       drawImageDataToCanvas(originalCanvas.current, gradePreviewData)
     }
-  }, [gradePreviewData])
+    // sourceData 必须入依赖：BEFORE canvas 由 `sourceData` 门禁挂载，它比派生数据晚一帧到位，
+    // 缺这一项时晚挂载的 canvas 不会被补画。
+  }, [gradePreviewData, sourceData])
 
   useEffect(() => {
     setImageRequestOptions({})

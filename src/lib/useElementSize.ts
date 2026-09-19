@@ -30,8 +30,16 @@ export function useElementSize(ref: RefObject<HTMLElement | null>, enabled = tru
       })
     }
 
-    const rect = element.getBoundingClientRect()
-    apply(rect.width, rect.height)
+    /*
+     * 首次测量必须与 ResizeObserver 同基准（content box）。
+     *
+     * 原先用 `getBoundingClientRect()`（border box），比 RO 回调里的 `contentRect` 多一个 border
+     * 宽度，于是「稳定尺寸」会被更新两次：一次是这里的 border box，一次是 RO 随后回填的 content box。
+     * 对预览框这类「尺寸一变就重栅格化」的消费方，等于每次进页面都白跑一次全图
+     * `drawImage` + `getImageData`（视口级数百毫秒）。`clientWidth/Height` 与 contentRect 同基准，
+     * 且本 hook 的两个调用点（追色 / 调色预览框）都没有 padding，两者数值一致。
+     */
+    apply(element.clientWidth, element.clientHeight)
 
     if (typeof ResizeObserver === 'undefined') {
       const onResize = () => {

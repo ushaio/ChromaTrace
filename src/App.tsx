@@ -458,7 +458,16 @@ function App() {
 
   const matchFrameSize = useElementSize(matchPreviewFrameRef, workspaceMode === 'match' && Boolean(source))
   const [stableMatchFrame, setStableMatchFrame] = useState(matchFrameSize)
+  /** 是否已经拿到过一次真实尺寸（见下：首次测量立即提交，此后才做 80ms 抖动抑制）。 */
+  const matchFrameMeasuredRef = useRef(false)
   useEffect(() => {
+    // 首次真实测量立即提交。进页面时再等一个 80ms 防抖窗口没有收益——此前根本没有尺寸可比，
+    // 只会把照片首帧整体推后一个防抖周期；抖动抑制只对「已有尺寸之后再变化」才有意义。
+    if (!matchFrameMeasuredRef.current && isViewportMeasured(matchFrameSize.width, matchFrameSize.height)) {
+      matchFrameMeasuredRef.current = true
+      setStableMatchFrame(matchFrameSize)
+      return
+    }
     const timer = window.setTimeout(() => setStableMatchFrame(matchFrameSize), 80)
     return () => window.clearTimeout(timer)
   }, [matchFrameSize.width, matchFrameSize.height])
@@ -635,8 +644,11 @@ function App() {
 
   useEffect(() => {
     if (workspaceMode !== 'match' || !matchPreviewData || !originalCanvas.current) return
+    // 依赖必须带 sourceData：BEFORE canvas 由 `sourceData` 门禁挂载，而它与派生数据不同步到位
+    // （source 先到，sourceData 隔一帧才到）。缺这一项时，只要 canvas 晚于派生数据挂载，
+    // 就再没有任何事件把它画出来——舞台会一直空着。
     drawImageDataToCanvas(originalCanvas.current, matchPreviewData)
-  }, [workspaceMode, matchPreviewData])
+  }, [workspaceMode, matchPreviewData, sourceData])
 
   useEffect(() => {
     if (workspaceMode !== 'match' || !matchPreviewData || !gpuResultCanvas.current) return
@@ -696,16 +708,27 @@ function App() {
       if (gpuPreviewRenderer.current === activeRenderer) gpuPreviewRenderer.current = null
       pendingGpuPreview.current = null
     }
-  }, [workspaceMode, matchPreviewData])
+  }, [workspaceMode, matchPreviewData, hasResult])
 
   useEffect(() => {
     pendingGpuPreview.current = { adjustments: visibleAdjustments, profile: activeMatchProfile }
-    if (workspaceMode !== 'match' || !matchPreviewData || previewFrame.current !== null) return
+    /*
+     * `hasResult` 必须进门禁。结果层 canvas 只在有追色结果时挂载（见 stage 的 JSX），
+     * 没有结果时 `gpuResultCanvas.current` 是 null，而早先这里只门禁了 matchPreviewData：
+     * 于是每次它变化（进页面 / 切图 / 改窗口大小）都会把整张视口图先跑完一遍 CPU 调色
+     * （`processImageData` 是逐像素 JS 管线，视口级一次就是数百毫秒），再把它画进 null。
+     * 这既是纯浪费，抛出的 TypeError 又打断了这一帧——刚算好的 BEFORE 像素因此迟迟上不了屏，
+     * 表现为「进 AI 追色要等一会图片才显示出来」。调色页的同位代码一直有这层守卫
+     * （`AiColorWorkspace.paintCpuPreview` 内部先判 canvas 为空），所以它没有这段停顿。
+     */
+    if (workspaceMode !== 'match' || !matchPreviewData || !hasResult || previewFrame.current !== null) return
 
     previewFrame.current = window.requestAnimationFrame(() => {
       previewFrame.current = null
       const pending = pendingGpuPreview.current
-      if (!pending) return
+      // 再判一次：canvas 可能在本帧被卸载（结果被重置），此时绝不触发 CPU 渲染。
+      const canvas = gpuResultCanvas.current
+      if (!pending || !canvas) return
 
       const renderer = gpuPreviewRenderer.current
       if (renderer && previewEngine === 'gpu') {
@@ -722,13 +745,10 @@ function App() {
       }
 
       if (previewEngine === 'error' || !gpuPreviewRenderer.current) {
-        drawImageDataToCanvas(
-          gpuResultCanvas.current!,
-          processImageData(matchPreviewData, pending.adjustments, pending.profile),
-        )
+        drawImageDataToCanvas(canvas, processImageData(matchPreviewData, pending.adjustments, pending.profile))
       }
     })
-  }, [workspaceMode, matchPreviewData, visibleAdjustments, activeMatchProfile, previewEngine])
+  }, [workspaceMode, matchPreviewData, hasResult, visibleAdjustments, activeMatchProfile, previewEngine])
 
   useEffect(() => {
     if (!isTauri()) return
